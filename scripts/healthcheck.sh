@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ -f "${ROOT_DIR}/.env" ]]; then
   set -a
@@ -17,14 +17,24 @@ if [[ -n "${MODEL_SERVER_API_KEY:-}" ]]; then
   headers=(-H "Authorization: Bearer ${MODEL_SERVER_API_KEY}")
 fi
 
+failures=0
 check() {
   local name="$1"
   local url="$2"
   echo "==> ${name}: ${url}"
-  curl --fail --silent --show-error "${headers[@]}" "${url}"
-  echo
+  if curl --fail --silent --show-error "${headers[@]}" "${url}"; then
+    echo
+  else
+    echo "[UNHEALTHY] ${name}" >&2
+    failures=$((failures + 1))
+  fi
 }
 
 check "Text LLM" "http://127.0.0.1:${TEXT_PORT}/v1/models"
 check "Voice LLM" "http://127.0.0.1:${VOICE_PORT}/v1/models"
 check "Speech" "http://127.0.0.1:${SPEECH_PORT}/health"
+
+if (( failures > 0 )); then
+  echo "${failures} service(s) are not healthy." >&2
+  exit 1
+fi
