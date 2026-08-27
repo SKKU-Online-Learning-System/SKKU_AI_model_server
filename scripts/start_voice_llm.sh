@@ -32,7 +32,7 @@ args=(
   --reasoning-parser qwen3
   --enable-auto-tool-choice
   --tool-call-parser qwen3_coder
-  --disable-log-requests
+  --no-enable-log-requests
   --enable-request-id-headers
 )
 
