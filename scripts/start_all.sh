@@ -21,18 +21,15 @@ RUN_DIR="${MODEL_SERVER_RUN_DIR:-${ROOT_DIR}/.run}"
 LOG_DIR="${MODEL_SERVER_LOG_DIR:-${ROOT_DIR}/logs}"
 mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
-: "${VLLM_TORCH_BACKEND:=cu129}"
-
-# Prepare the two isolated environments explicitly. Important: every later
-# `uv run` uses --no-sync so uv cannot silently re-resolve PyTorch with a
-# different CUDA backend during verification or service startup.
-echo "==> Syncing LLM runtime (vLLM CUDA 12.9 backend)"
-UV_TORCH_BACKEND="${VLLM_TORCH_BACKEND}" uv sync --project "${ROOT_DIR}/llm_runtime" --no-dev
+# CUDA selection is encoded in each project's pyproject.toml via explicit
+# PyTorch indexes. Do not rely on UV_TORCH_BACKEND with uv sync: that setting
+# only applies to uv's pip interface.
+echo "==> Syncing LLM runtime (PyTorch CUDA 12.9 index)"
+uv sync --project "${ROOT_DIR}/llm_runtime" --no-dev
 
 echo "==> Verifying LLM CUDA runtime"
 CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}" \
-UV_TORCH_BACKEND="${VLLM_TORCH_BACKEND}" \
-uv run --no-sync --project "${ROOT_DIR}/llm_runtime" python -c '
+"${ROOT_DIR}/llm_runtime/.venv/bin/python" -c '
 import torch, vllm
 print(f"llm vllm={vllm.__version__} torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
 if not (torch.version.cuda or "").startswith("12.9"):
@@ -43,13 +40,12 @@ torch.cuda.set_device(0)
 print(f"llm gpu={torch.cuda.get_device_name(0)}")
 '
 
-echo "==> Syncing Speech runtime (PyTorch CUDA 12.8 backend)"
-UV_TORCH_BACKEND=cu128 uv sync --project "${ROOT_DIR}/speech_server" --no-dev
+echo "==> Syncing Speech runtime (PyTorch CUDA 12.8 index)"
+uv sync --project "${ROOT_DIR}/speech_server" --no-dev
 
 echo "==> Verifying Speech CUDA runtime"
 CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID:-5}" \
-UV_TORCH_BACKEND=cu128 \
-uv run --no-sync --project "${ROOT_DIR}/speech_server" python -c '
+"${ROOT_DIR}/speech_server/.venv/bin/python" -c '
 import torch
 print(f"speech torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
 if not (torch.version.cuda or "").startswith("12.8"):
