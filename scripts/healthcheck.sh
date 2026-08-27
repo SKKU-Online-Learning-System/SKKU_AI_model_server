@@ -18,11 +18,11 @@ if [[ -n "${MODEL_SERVER_API_KEY:-}" ]]; then
 fi
 
 failures=0
-check() {
+check_http() {
   local name="$1"
   local url="$2"
   echo "==> ${name}: ${url}"
-  if curl --fail --silent --show-error "${headers[@]}" "${url}"; then
+  if curl --fail --silent --show-error --max-time 5 "${headers[@]}" "${url}"; then
     echo
   else
     echo "[UNHEALTHY] ${name}" >&2
@@ -30,11 +30,29 @@ check() {
   fi
 }
 
-check "Text LLM" "http://127.0.0.1:${TEXT_PORT}/v1/models"
-check "Voice LLM" "http://127.0.0.1:${VOICE_PORT}/v1/models"
-check "Speech" "http://127.0.0.1:${SPEECH_PORT}/health"
+check_speech() {
+  local url="http://127.0.0.1:${SPEECH_PORT}/health"
+  local response
+  echo "==> Speech: ${url}"
+  if ! response="$(curl --fail --silent --show-error --max-time 5 "${headers[@]}" "${url}")"; then
+    echo "[UNHEALTHY] Speech" >&2
+    failures=$((failures + 1))
+    return
+  fi
+  echo "${response}"
+  if ! grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"${response}"; then
+    echo "[UNHEALTHY] Speech is reachable but models are not ready" >&2
+    failures=$((failures + 1))
+  fi
+}
+
+check_http "Text LLM" "http://127.0.0.1:${TEXT_PORT}/v1/models"
+check_http "Voice LLM" "http://127.0.0.1:${VOICE_PORT}/v1/models"
+check_speech
 
 if (( failures > 0 )); then
   echo "${failures} service(s) are not healthy." >&2
   exit 1
 fi
+
+echo "All services are healthy and ready."
