@@ -15,6 +15,7 @@ fi
 : "${VOICE_PORT:=8002}"
 : "${VOICE_GPU_IDS:=4}"
 : "${VOICE_MAX_MODEL_LEN:=8192}"
+: "${VOICE_MAX_NUM_SEQS:=32}"
 : "${VOICE_GPU_MEMORY_UTILIZATION:=0.88}"
 : "${VOICE_LANGUAGE_MODEL_ONLY:=true}"
 : "${MODEL_SERVER_HOST:=0.0.0.0}"
@@ -30,6 +31,7 @@ args=(
   --port "${VOICE_PORT}"
   --tensor-parallel-size 1
   --max-model-len "${VOICE_MAX_MODEL_LEN}"
+  --max-num-seqs "${VOICE_MAX_NUM_SEQS}"
   --gpu-memory-utilization "${VOICE_GPU_MEMORY_UTILIZATION}"
   --dtype bfloat16
   --reasoning-parser qwen3
