@@ -21,9 +21,25 @@ RUN_DIR="${MODEL_SERVER_RUN_DIR:-${ROOT_DIR}/.run}"
 LOG_DIR="${MODEL_SERVER_LOG_DIR:-${ROOT_DIR}/logs}"
 mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
-# Resolve/install the two isolated uv environments before starting concurrent services.
-echo "==> Syncing LLM runtime"
-uv sync --project "${ROOT_DIR}/llm_runtime" --no-dev
+: "${VLLM_TORCH_BACKEND:=cu129}"
+
+# Keep LLM and Speech in isolated uv environments. The default vLLM 0.28.0
+# wheel is CUDA 13 and cannot run on the school R570/CUDA-12.x driver. Use the
+# official CUDA 12.9 vLLM wheel together with the CUDA 12.9 PyTorch backend.
+echo "==> Syncing LLM runtime (vLLM CUDA 12.9 backend)"
+UV_TORCH_BACKEND="${VLLM_TORCH_BACKEND}" uv sync --project "${ROOT_DIR}/llm_runtime" --no-dev
+
+echo "==> Verifying LLM CUDA runtime"
+CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}" uv run --project "${ROOT_DIR}/llm_runtime" python -c '
+import torch, vllm
+print(f"llm vllm={vllm.__version__} torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
+if not (torch.version.cuda or "").startswith("12.9"):
+    raise SystemExit("LLM runtime is not using a CUDA 12.9 PyTorch build")
+if not torch.cuda.is_available():
+    raise SystemExit("LLM runtime cannot initialize CUDA")
+torch.cuda.set_device(0)
+print(f"llm gpu={torch.cuda.get_device_name(0)}")
+'
 
 echo "==> Syncing Speech runtime (PyTorch CUDA 12.8 backend)"
 UV_TORCH_BACKEND=cu128 uv sync --project "${ROOT_DIR}/speech_server" --no-dev
@@ -36,6 +52,8 @@ if not (torch.version.cuda or "").startswith("12.8"):
     raise SystemExit("Speech runtime is not using a CUDA 12.8 PyTorch build")
 if not torch.cuda.is_available():
     raise SystemExit("Speech runtime cannot initialize CUDA")
+torch.cuda.set_device(0)
+print(f"speech gpu={torch.cuda.get_device_name(0)}")
 '
 
 start_service() {
