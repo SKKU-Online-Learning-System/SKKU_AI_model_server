@@ -4,5 +4,20 @@ version = "0.1.0"
 description = "Pinned vLLM runtime for SKKU text and voice LLM serving"
 requires-python = ">=3.12,<3.14"
 dependencies = [
+  "torch==2.13.0",
+  "torchaudio==2.11.0",
+  "torchvision==0.28.0",
   "vllm @ https://github.com/vllm-project/vllm/releases/download/v0.28.0/vllm-0.28.0%2Bcu129-cp38-abi3-manylinux_2_28_x86_64.whl",
 ]
+
+# uv project commands do not honor UV_TORCH_BACKEND for dependency resolution.
+# Route the PyTorch family explicitly to the official CUDA 12.9 index instead.
+[tool.uv.sources]
+torch = { index = "pytorch-cu129" }
+torchaudio = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
