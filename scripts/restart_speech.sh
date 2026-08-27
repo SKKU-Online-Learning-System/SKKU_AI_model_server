@@ -19,28 +19,63 @@ PID_FILE="${RUN_DIR}/speech.pid"
 LOG_FILE="${LOG_DIR}/speech.log"
 mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
+wait_pid_exit() {
+  local pid="$1"
+  local seconds="${2:-60}"
+  for _ in $(seq 1 "${seconds}"); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+stop_pid() {
+  local pid="$1"
+  if ! kill -0 "${pid}" 2>/dev/null; then
+    return 0
+  fi
+  kill -TERM "${pid}" 2>/dev/null || true
+  if ! wait_pid_exit "${pid}" 60; then
+    kill -KILL "${pid}" 2>/dev/null || true
+    wait_pid_exit "${pid}" 10 || true
+  fi
+}
+
+# Stop the process recorded by our lifecycle manager.
 if [[ -f "${PID_FILE}" ]]; then
   pid="$(cat "${PID_FILE}")"
-  if kill -0 -- "-${pid}" 2>/dev/null; then
-    echo "==> Stopping speech (process group ${pid})"
-    kill -TERM -- "-${pid}" 2>/dev/null || true
-    for _ in $(seq 1 60); do
-      if ! kill -0 -- "-${pid}" 2>/dev/null; then
-        break
-      fi
-      sleep 1
-    done
-    if kill -0 -- "-${pid}" 2>/dev/null; then
-      echo "    graceful shutdown timed out; sending SIGKILL"
-      kill -KILL -- "-${pid}" 2>/dev/null || true
-    fi
+  if kill -0 "${pid}" 2>/dev/null; then
+    echo "==> Stopping managed speech process ${pid}"
+    stop_pid "${pid}"
   fi
   rm -f "${PID_FILE}"
 fi
 
+# Clean up a leftover user-owned uvicorn from an older process-group based
+# launcher. The speech port is dedicated to this service on this single-user
+# development server, so only the exact speech_server.main:app command is
+# matched.
+mapfile -t leftover_pids < <(
+  pgrep -u "$(id -u)" -f "speech_server\.main:app.*--port[ =]${SPEECH_PORT}" 2>/dev/null || true
+)
+if (( ${#leftover_pids[@]} > 0 )); then
+  echo "==> Cleaning up leftover speech process(es): ${leftover_pids[*]}"
+  for old_pid in "${leftover_pids[@]}"; do
+    stop_pid "${old_pid}"
+  done
+fi
+
+# A cheap sync keeps the speech venv aligned with the checked-out code without
+# touching the already-running Text/Voice LLM processes.
+uv sync --project "${ROOT_DIR}/speech_server" --no-dev >/dev/null
+
 echo "==> Starting speech; log: ${LOG_FILE}"
 : >"${LOG_FILE}"
-nohup setsid "${ROOT_DIR}/scripts/start_speech.sh" >"${LOG_FILE}" 2>&1 < /dev/null &
+# nohup is sufficient for persistence here. start_speech.sh execs uvicorn, so
+# $! remains the actual uvicorn PID and can be tracked reliably.
+nohup "${ROOT_DIR}/scripts/start_speech.sh" >"${LOG_FILE}" 2>&1 < /dev/null &
 pid=$!
 echo "${pid}" >"${PID_FILE}"
 
@@ -53,17 +88,23 @@ deadline=$((SECONDS + TIMEOUT_SECONDS))
 last_notice=${SECONDS}
 echo "==> Waiting for speech readiness (timeout ${TIMEOUT_SECONDS}s)"
 while (( SECONDS < deadline )); do
-  if ! kill -0 -- "-${pid}" 2>/dev/null; then
+  if ! kill -0 "${pid}" 2>/dev/null; then
     echo "Speech exited before becoming ready. Last log lines:" >&2
-    tail -n 160 "${LOG_FILE}" >&2 || true
+    tail -n 200 "${LOG_FILE}" >&2 || true
     rm -f "${PID_FILE}"
     exit 1
   fi
 
   response="$(curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${SPEECH_PORT}/health" 2>/dev/null || true)"
   if grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"${response}"; then
-    echo "    speech: READY"
+    echo "    speech: READY (pid ${pid})"
     exit 0
+  fi
+
+  if grep -Eq '"status"[[:space:]]*:[[:space:]]*"error"' <<<"${response}"; then
+    echo "Speech reported model-loading error: ${response}" >&2
+    tail -n 200 "${LOG_FILE}" >&2 || true
+    exit 1
   fi
 
   if (( SECONDS - last_notice >= 30 )); then
@@ -74,5 +115,5 @@ while (( SECONDS < deadline )); do
 done
 
 echo "Speech did not become ready within ${TIMEOUT_SECONDS}s. Last log lines:" >&2
-tail -n 160 "${LOG_FILE}" >&2 || true
+tail -n 200 "${LOG_FILE}" >&2 || true
 exit 1
