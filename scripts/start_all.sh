@@ -22,18 +22,21 @@ LOG_DIR="${MODEL_SERVER_LOG_DIR:-${ROOT_DIR}/logs}"
 mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
 # CUDA selection is encoded in each project's pyproject.toml via explicit
-# PyTorch indexes. Do not rely on UV_TORCH_BACKEND with uv sync: that setting
-# only applies to uv's pip interface.
+# PyTorch indexes. The LLM project routes torch, torchaudio, torchvision, and
+# torchcodec to the same CUDA 12.9 index so compiled extensions stay ABI-aligned.
 echo "==> Syncing LLM runtime (PyTorch CUDA 12.9 index)"
 uv sync --project "${ROOT_DIR}/llm_runtime" --no-dev
 
 echo "==> Verifying LLM CUDA runtime"
 CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}" \
 "${ROOT_DIR}/llm_runtime/.venv/bin/python" -c '
-import torch, vllm
-print(f"llm vllm={vllm.__version__} torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
+from importlib.metadata import version
+import torch, vllm, torchcodec
+print(f"llm vllm={vllm.__version__} torch={torch.__version__} torchcodec={version(\"torchcodec\")} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
 if not (torch.version.cuda or "").startswith("12.9"):
     raise SystemExit("LLM runtime is not using a CUDA 12.9 PyTorch build")
+if "+cu129" not in version("torchcodec"):
+    raise SystemExit("LLM runtime torchcodec is not using the CUDA 12.9 build")
 if not torch.cuda.is_available():
     raise SystemExit("LLM runtime cannot initialize CUDA")
 torch.cuda.set_device(0)
