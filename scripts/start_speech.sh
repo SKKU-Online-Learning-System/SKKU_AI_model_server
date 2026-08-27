@@ -16,8 +16,11 @@ fi
 : "${MODEL_SERVER_HOST:=0.0.0.0}"
 
 export CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID}"
+export UV_TORCH_BACKEND=cu128
 
-exec uv run --project "${ROOT_DIR}/speech_server" \
+# start_all.sh prepares the cu128 Speech environment. --no-sync keeps that
+# exact runtime instead of allowing uv run to resolve another CUDA backend.
+exec uv run --no-sync --project "${ROOT_DIR}/speech_server" \
   uvicorn speech_server.main:app \
   --host "${MODEL_SERVER_HOST}" \
   --port "${SPEECH_PORT}" \
