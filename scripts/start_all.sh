@@ -23,14 +23,16 @@ mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
 : "${VLLM_TORCH_BACKEND:=cu129}"
 
-# Keep LLM and Speech in isolated uv environments. The default vLLM 0.28.0
-# wheel is CUDA 13 and cannot run on the school R570/CUDA-12.x driver. Use the
-# official CUDA 12.9 vLLM wheel together with the CUDA 12.9 PyTorch backend.
+# Prepare the two isolated environments explicitly. Important: every later
+# `uv run` uses --no-sync so uv cannot silently re-resolve PyTorch with a
+# different CUDA backend during verification or service startup.
 echo "==> Syncing LLM runtime (vLLM CUDA 12.9 backend)"
 UV_TORCH_BACKEND="${VLLM_TORCH_BACKEND}" uv sync --project "${ROOT_DIR}/llm_runtime" --no-dev
 
 echo "==> Verifying LLM CUDA runtime"
-CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}" uv run --project "${ROOT_DIR}/llm_runtime" python -c '
+CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}" \
+UV_TORCH_BACKEND="${VLLM_TORCH_BACKEND}" \
+uv run --no-sync --project "${ROOT_DIR}/llm_runtime" python -c '
 import torch, vllm
 print(f"llm vllm={vllm.__version__} torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
 if not (torch.version.cuda or "").startswith("12.9"):
@@ -45,7 +47,9 @@ echo "==> Syncing Speech runtime (PyTorch CUDA 12.8 backend)"
 UV_TORCH_BACKEND=cu128 uv sync --project "${ROOT_DIR}/speech_server" --no-dev
 
 echo "==> Verifying Speech CUDA runtime"
-CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID:-5}" uv run --project "${ROOT_DIR}/speech_server" python -c '
+CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID:-5}" \
+UV_TORCH_BACKEND=cu128 \
+uv run --no-sync --project "${ROOT_DIR}/speech_server" python -c '
 import torch
 print(f"speech torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
 if not (torch.version.cuda or "").startswith("12.8"):
