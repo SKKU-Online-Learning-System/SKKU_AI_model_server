@@ -25,8 +25,18 @@ mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 echo "==> Syncing LLM runtime"
 uv sync --project "${ROOT_DIR}/llm_runtime" --no-dev
 
-echo "==> Syncing Speech runtime"
-uv sync --project "${ROOT_DIR}/speech_server" --no-dev
+echo "==> Syncing Speech runtime (PyTorch CUDA 12.8 backend)"
+UV_TORCH_BACKEND=cu128 uv sync --project "${ROOT_DIR}/speech_server" --no-dev
+
+echo "==> Verifying Speech CUDA runtime"
+CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID:-5}" uv run --project "${ROOT_DIR}/speech_server" python -c '
+import torch
+print(f"speech torch={torch.__version__} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
+if not (torch.version.cuda or "").startswith("12.8"):
+    raise SystemExit("Speech runtime is not using a CUDA 12.8 PyTorch build")
+if not torch.cuda.is_available():
+    raise SystemExit("Speech runtime cannot initialize CUDA")
+'
 
 start_service() {
   local name="$1"
