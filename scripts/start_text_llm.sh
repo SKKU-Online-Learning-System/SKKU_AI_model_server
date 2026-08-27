@@ -1,6 +1,16 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "${ROOT_DIR}"
+
+if [[ -f "${ROOT_DIR}/.env" ]]; then
+  set -a
+  # shellcheck disable=SC1091
+  source "${ROOT_DIR}/.env"
+  set +a
+fi
+
 : "${TEXT_MODEL:=Qwen/Qwen3.8-27B}"
 : "${TEXT_PORT:=8001}"
 : "${TEXT_GPU_IDS:=0,1,2,3}"
@@ -34,4 +44,4 @@ if [[ -n "${MODEL_SERVER_API_KEY:-}" ]]; then
   args+=(--api-key "${MODEL_SERVER_API_KEY}")
 fi
 
-exec uv run --project /app/llm_runtime "${args[@]}"
+exec uv run --project "${ROOT_DIR}/llm_runtime" "${args[@]}"
