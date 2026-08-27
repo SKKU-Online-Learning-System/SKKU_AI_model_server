@@ -2,21 +2,16 @@
 
 Independent, stateless GPU inference server for **SKKU Course Agent**.
 
-This repository serves models only. Application logic remains in
-`SKKU-Online-Learning-System/SKKU_AI_agent` and is intentionally not implemented here.
+This repository serves models only. Application logic remains in `SKKU_AI_agent`.
 
 ## Architecture
 
-| Service | Model | Physical GPU | Runtime | Port |
+| Service | Model | GPU | Runtime | Port |
 |---|---|---:|---|---:|
-| Text LLM | `Qwen/Qwen3.8-27B` | 0,1,2,3 | vLLM, BF16, TP=4 | 8001 |
-| Voice LLM | `Qwen/Qwen3.5-9B` | 4 | vLLM, BF16, TP=1 | 8002 |
+| Text LLM | `Qwen/Qwen3.8-27B` | 0,1,2,3 | vLLM 0.28.0, BF16, TP=4 | 8001 |
+| Voice LLM | `Qwen/Qwen3.5-9B` | 4 | vLLM 0.28.0, BF16, TP=1 | 8002 |
 | ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8010 |
 | TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | official `qwen-tts` | 8010 |
-
-The Speech service is one FastAPI process. ASR and TTS are loaded in the same process and share one
-inference lock. This matches the current single-user development workload and avoids allocating separate
-GPUs to ASR and TTS.
 
 Expected application URLs:
 
@@ -28,39 +23,33 @@ SPEECH_BASE_URL=http://<MODEL_SERVER>:8010
 
 ## Repository boundary
 
-This repository does **not** implement RAG, PostgreSQL/pgvector, JWT/RBAC, course logic, External Brain,
-tool execution, trusted web search, visualization, Silero VAD, turn-taking, barge-in orchestration,
-WebSocket session orchestration, frontend logic, or chat history.
+This repository does **not** implement RAG, databases, pgvector, course logic, tool execution, web search,
+visualization, VAD, turn-taking, barge-in, WebSocket session orchestration, frontend logic, or chat history.
 
-Those responsibilities belong to `SKKU_AI_agent`.
+## Runtime: uv only
 
-## Runtime model: uv only
-
-The school development session is already provided inside a GPU-enabled environment. This repository runs
-all model processes **directly with uv**.
-
-There is no Docker Compose runtime and no Docker-in-Docker requirement. `/var/run/docker.sock` is not
-required.
-
-The runtime layout is:
+The school development session is already a GPU-enabled container. The model server therefore runs directly
+with **uv**. There is no Docker Compose runtime and no Docker-in-Docker requirement.
 
 ```text
-school GPU environment
+school GPU container
 ├── GPU 0,1,2,3  Text LLM    :8001
 ├── GPU 4        Voice LLM   :8002
 └── GPU 5        Speech      :8010
-    ├── Qwen3-ASR-0.6B
-    └── Qwen3-TTS-12Hz-0.6B-CustomVoice
+    ├── ASR
+    └── TTS
 ```
 
-Service lifecycle is managed directly by:
+Lifecycle scripts:
 
 ```text
 scripts/start_all.sh
 scripts/stop_all.sh
+scripts/healthcheck.sh
+scripts/gpu_status.sh
 ```
 
-`start_all.sh` launches each service in its own process group and stores:
+Runtime state:
 
 ```text
 .run/text-llm.pid
@@ -72,82 +61,99 @@ logs/voice-llm.log
 logs/speech.log
 ```
 
-Both directories are ignored by Git.
+`.run/` and `logs/` are ignored by Git.
 
-## Target hardware
+## School GPU environment
 
-Current school development server target:
+Target:
 
 - NVIDIA RTX A5000 24 GB x 6
-- Driver 570.169
-- CUDA 12.8
-- CPU: 32 cores recommended
-- RAM: 128-160 GiB recommended
+- NVIDIA driver: R570 family
+- Driver-reported CUDA capability: CUDA 12.8
+- Python: 3.12
 
-Current school GPU environment is based on CUDA 12.8.1 / PyTorch 2.8.0 / Ubuntu 24.04.
+### Important CUDA compatibility split
+
+The LLM and Speech services intentionally use separate uv environments.
+
+#### LLM runtime
+
+A plain PyPI resolution of `vllm==0.28.0` can select the CUDA 13 build and install a PyTorch build such as
+`torch 2.13.0+cu130`. That build cannot initialize CUDA on the school R570 / CUDA-12.x driver.
+
+The repository therefore pins the official x86_64 **vLLM 0.28.0 CUDA 12.9 wheel** directly:
+
+```text
+vllm-0.28.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl
+```
+
+and syncs the LLM environment with:
+
+```bash
+UV_TORCH_BACKEND=cu129 uv sync --project llm_runtime --no-dev
+```
+
+The default is also exposed as:
+
+```dotenv
+VLLM_TORCH_BACKEND=cu129
+```
+
+CUDA 12.9 is in the CUDA 12.x minor-version compatibility family used by the school R570 driver.
+
+#### Speech runtime
+
+Speech remains pinned to the CUDA 12.8 PyTorch line:
+
+```text
+torch==2.8.0
+torchaudio==2.8.0
+```
+
+and is synced with:
+
+```bash
+UV_TORCH_BACKEND=cu128 uv sync --project speech_server --no-dev
+```
+
+Do not merge the LLM and Speech Python environments.
 
 ## Dependency management
 
-All Python dependency management uses **uv**.
+All Python package management uses **uv**.
 
-There are three uv projects:
+Projects:
 
 - root `pyproject.toml`: tests and benchmark client
 - `llm_runtime/pyproject.toml`: vLLM runtime
 - `speech_server/pyproject.toml`: FastAPI + Qwen ASR/TTS runtime
 
-Pinned primary packages:
-
-```text
-vllm==0.28.0
-qwen-asr==0.0.6
-qwen-tts==0.1.1
-transformers==4.57.6  # speech runtime override
-```
-
-### Qwen ASR/TTS dependency conflict
-
-The official packages currently declare different Transformers patch versions:
+Speech also has a Transformers packaging override because the official Qwen packages currently declare
+different patch versions:
 
 - `qwen-asr==0.0.6` -> `transformers==4.57.6`
 - `qwen-tts==0.1.1` -> `transformers==4.57.3`
 
-The Speech project therefore keeps a **local uv override** for `transformers==4.57.6`. This override is
-isolated to `speech_server` and must not be applied to the vLLM environment.
+The Speech environment resolves both with `transformers==4.57.6`.
 
-## 1. Clone or update the repository
-
-```bash
-git clone https://github.com/SKKU-Online-Learning-System/SKKU_AI_model_server.git
-cd SKKU_AI_model_server
-```
-
-If it is already cloned:
+## 1. Update the repository
 
 ```bash
+cd ~/workspace/SKKU_AI_model_server
 git pull
 ```
 
-## 2. Verify the GPU environment
+## 2. Verify GPUs and uv
 
 ```bash
 nvidia-smi
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv
-```
-
-Verify uv:
-
-```bash
 uv --version
 ```
 
-The projects require Python 3.12 or newer. If an appropriate interpreter is not already available:
-
-```bash
-uv python install 3.12
-```
-
 ## 3. Configure environment variables
+
+For a new checkout:
 
 ```bash
 cp .env.example .env
@@ -158,6 +164,7 @@ Important defaults:
 ```dotenv
 HF_HOME=/models/huggingface
 MODEL_SERVER_HOST=0.0.0.0
+VLLM_TORCH_BACKEND=cu129
 
 TEXT_MODEL=Qwen/Qwen3.8-27B
 TEXT_PORT=8001
@@ -179,18 +186,15 @@ TTS_LANGUAGE=Korean
 TTS_SPEAKER=Sohee
 ```
 
-All model IDs, GPU mappings, ports, context limits, and the optional API key are configurable through
-`.env`.
-
 ### API key
 
-Generate a private model-server key, for example:
+Generate one locally on the server:
 
 ```bash
 echo "skku-ms-$(openssl rand -hex 32)"
 ```
 
-Then place it only in `.env`:
+Store it only in `.env`:
 
 ```dotenv
 MODEL_SERVER_API_KEY=skku-ms-...
@@ -198,83 +202,62 @@ MODEL_SERVER_API_KEY=skku-ms-...
 
 Never commit `.env` or the API key.
 
-## 4. Prepare the Hugging Face cache
-
-The configured default is:
-
-```text
-/models/huggingface
-```
-
-Make sure the directory exists and is writable by the current user. If `/models` is not writable, point
-`HF_HOME` in `.env` to another persistent directory provided by the school environment.
-
-For example:
-
-```bash
-mkdir -p "$HOME/.cache/huggingface"
-```
-
-and:
+For faster Hugging Face downloads, set your own token in `.env`:
 
 ```dotenv
-HF_HOME=/home/<USER>/.cache/huggingface
+HF_TOKEN=hf_...
 ```
 
-Model weights are never stored in Git.
-
-Pre-download the configured models:
+## 4. Download model snapshots
 
 ```bash
 ./scripts/download_models.sh
 ```
 
-Existing Hugging Face snapshots are reused.
+The default persistent cache is:
 
-## 5. Sync the uv environments
-
-The all-in-one startup script performs these syncs automatically, but they can also be run explicitly:
-
-```bash
-uv sync --project llm_runtime --no-dev
-uv sync --project speech_server --no-dev
+```text
+/models/huggingface
 ```
 
-For repository tests:
+Existing snapshots are reused.
+
+## 5. Start all services
+
+If older processes are running, stop them first:
 
 ```bash
-uv sync
+./scripts/stop_all.sh
 ```
 
-After dependency compatibility is verified on the school server, lock the projects for reproducibility:
-
-```bash
-uv lock
-uv lock --project llm_runtime
-uv lock --project speech_server
-```
-
-## 6. Start all model services
+Then:
 
 ```bash
 ./scripts/start_all.sh
 ```
 
-The script:
+Before launching the services, `start_all.sh` performs two real CUDA preflight checks.
 
-1. loads `.env`
-2. verifies `uv`, `nvidia-smi`, and `setsid`
-3. syncs the LLM and Speech uv projects
-4. launches Text LLM on GPU 0-3
-5. launches Voice LLM on GPU 4
-6. launches Speech on GPU 5
-7. writes PID files under `.run/`
-8. writes logs under `logs/`
+Expected LLM check:
 
-Launching a process does not mean the model is immediately ready. Large models can take several minutes to
-load.
+```text
+llm vllm=0.28.0 torch=2.13.0+cu129 cuda=12.9 available=True
+llm gpu=NVIDIA RTX A5000
+```
 
-### Watch logs
+Expected Speech check:
+
+```text
+speech torch=2.8.0+cu128 cuda=12.8 available=True
+speech gpu=NVIDIA RTX A5000
+```
+
+The checks call `torch.cuda.set_device(0)`, not only `torch.cuda.is_available()`, so a driver/runtime mismatch
+fails before model processes are launched.
+
+Large models can take several minutes to load after the processes start.
+
+## 6. Watch startup
 
 ```bash
 tail -f logs/text-llm.log
@@ -288,39 +271,13 @@ tail -f logs/voice-llm.log
 tail -f logs/speech.log
 ```
 
-### Inspect GPU usage
+GPU status:
 
 ```bash
 ./scripts/gpu_status.sh
 ```
 
-## 7. Start a service manually
-
-The individual scripts run in the foreground and are useful for debugging.
-
-Text LLM:
-
-```bash
-./scripts/start_text_llm.sh
-```
-
-Voice LLM:
-
-```bash
-./scripts/start_voice_llm.sh
-```
-
-Speech:
-
-```bash
-./scripts/start_speech.sh
-```
-
-The scripts calculate the repository root dynamically; there is no fixed `/app/...` runtime path.
-
-## 8. Health checks
-
-After the models finish loading:
+## 7. Health checks
 
 ```bash
 ./scripts/healthcheck.sh
@@ -329,36 +286,51 @@ After the models finish loading:
 Endpoints:
 
 ```text
-GET http://localhost:8001/v1/models
-GET http://localhost:8002/v1/models
-GET http://localhost:8010/health
+GET http://127.0.0.1:8001/v1/models
+GET http://127.0.0.1:8002/v1/models
+GET http://127.0.0.1:8010/health
 ```
 
-Speech `/health` returns `ready=false` while ASR/TTS are still loading.
+Speech returns `ready=false` while its models are still loading.
 
-Example ready response:
+## 8. Debug the LLM environment
 
-```json
-{
-  "status": "ok",
-  "ready": true,
-  "gpu": "NVIDIA RTX A5000",
-  "asr_model": "Qwen/Qwen3-ASR-0.6B",
-  "tts_model": "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice",
-  "error": null
-}
+Check exactly what uv installed:
+
+```bash
+uv run --project llm_runtime python - <<'PY'
+import torch, vllm
+print("vLLM:", vllm.__version__)
+print("Torch:", torch.__version__)
+print("CUDA build:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+torch.cuda.set_device(0)
+print("GPU:", torch.cuda.get_device_name(0))
+PY
 ```
 
-## 9. Text and Voice LLM APIs
+Correct result should be CUDA 12.9, not CUDA 13.0.
 
-Both vLLM services expose OpenAI-compatible endpoints:
+If an older LLM environment was created before the cu129 pin was added, reset only that environment:
+
+```bash
+rm -rf llm_runtime/.venv
+rm -f llm_runtime/uv.lock
+UV_TORCH_BACKEND=cu129 uv sync --project llm_runtime --no-dev
+```
+
+Do not delete the Hugging Face model cache; the downloaded model weights can be reused.
+
+## 9. Text and Voice APIs
+
+Both vLLM services expose OpenAI-compatible APIs:
 
 ```text
 GET  /v1/models
 POST /v1/chat/completions
 ```
 
-The launch scripts enable the current Qwen reasoning/tool parsers:
+The launch scripts enable:
 
 ```text
 --reasoning-parser qwen3
@@ -366,22 +338,16 @@ The launch scripts enable the current Qwen reasoning/tool parsers:
 --tool-call-parser qwen3_coder
 ```
 
-The server does not inject its own application system prompt.
+No application system prompt is injected by the model server.
 
-### Disable thinking per request
-
-For latency-sensitive Voice Agent requests:
+Thinking can be disabled per request, for example:
 
 ```json
 {
   "model": "Qwen/Qwen3.5-9B",
-  "messages": [
-    {"role": "user", "content": "짧게 답해줘."}
-  ],
+  "messages": [{"role":"user","content":"짧게 답해줘."}],
   "stream": true,
-  "chat_template_kwargs": {
-    "enable_thinking": false
-  }
+  "chat_template_kwargs": {"enable_thinking": false}
 }
 ```
 
@@ -392,13 +358,6 @@ POST /v1/audio/transcriptions
 Content-Type: multipart/form-data
 ```
 
-Input:
-
-- `file=<audio>`
-- optional `language=Korean`
-- raw PCM: PCM16, mono, 16 kHz
-- WAV is also supported and normalized before inference
-
 Example:
 
 ```bash
@@ -408,7 +367,7 @@ curl -X POST http://localhost:8010/v1/audio/transcriptions \
   -F 'language=Korean'
 ```
 
-Example response:
+Response contract:
 
 ```json
 {
@@ -419,8 +378,7 @@ Example response:
 }
 ```
 
-The MVP API is utterance-level. `ASRService` is isolated so a future streaming backend can replace it without
-changing the public HTTP contract.
+The MVP is utterance-level. Raw PCM16 mono 16 kHz and WAV are supported.
 
 ## 11. TTS API
 
@@ -444,80 +402,27 @@ curl -X POST http://localhost:8010/v1/audio/speech \
   --output output.wav
 ```
 
-Supported output formats:
+Output:
 
-- `pcm`: raw PCM16 little-endian, mono, 24 kHz
+- `pcm`: PCM16 little-endian, mono, 24 kHz
 - `wav`: PCM16 WAV, mono, 24 kHz
 
-The service uses the official Qwen CustomVoice implementation. `TTSService` remains isolated so the backend
-can be replaced later without changing the API contract.
+## 12. Tests and smoke test
 
-## 12. Authentication
-
-When `MODEL_SERVER_API_KEY` is non-empty, all model APIs require:
-
-```text
-Authorization: Bearer <MODEL_SERVER_API_KEY>
-```
-
-For example:
-
-```bash
-curl http://localhost:8001/v1/models \
-  -H "Authorization: Bearer $MODEL_SERVER_API_KEY"
-```
-
-Leave `MODEL_SERVER_API_KEY` empty only for authentication-free development inside a trusted environment.
-
-## 13. Unit and API-contract tests
-
-Tests do not download the large models. They use mocked ASR/TTS backends.
+Unit/API tests do not load the large models:
 
 ```bash
 uv sync
 uv run pytest
 ```
 
-Covered contracts include:
-
-- config parsing
-- `/health`
-- optional authentication
-- malformed audio
-- ASR response schema
-- TTS request validation
-- invalid speaker
-- invalid output format
-- PCM16 mono 24 kHz output
-
-## 14. GPU smoke test
-
-After all services are healthy:
+After all real services are healthy:
 
 ```bash
-uv sync
 ./scripts/smoke_test.sh
 ```
 
-It verifies:
-
-1. Text LLM Korean completion
-2. Text streaming
-3. Text tool calling
-4. Voice LLM streaming
-5. Korean Sohee TTS
-6. Korean ASR
-7. PCM16 / mono / 24 kHz Speech contract
-
-To use an independent Korean WAV:
-
-```bash
-./scripts/smoke_test.sh --asr-wav /path/to/korean.wav
-```
-
-## 15. Benchmark
-
-Default single-user benchmark:
+## 13. Benchmark
 
 ```bash
 uv run python scripts/benchmark.py \
@@ -526,23 +431,12 @@ uv run python scripts/benchmark.py \
   --output benchmark-results/concurrency-1.json
 ```
 
-Metrics:
+Metrics include LLM TTFT/tokens-per-second, ASR/TTS latency and RTF, and GPU utilization snapshots.
 
-- Text LLM: TTFT, output tokens/sec, total latency
-- Voice LLM: TTFT, output tokens/sec, total latency
-- ASR: inference latency, audio duration, RTF
-- TTS: generation latency, generated audio duration, RTF
-- GPU: VRAM usage/utilization snapshot
-
-Do not publish benchmark values until they are measured on the actual school A5000 server.
-
-## 16. Stop all services
+## 14. Stop all services
 
 ```bash
 ./scripts/stop_all.sh
 ```
 
-The script reads the `.run/*.pid` files, sends `SIGTERM` to each process group, waits up to 30 seconds, and
-uses `SIGKILL` only if a process does not stop cleanly.
-
-Model weights remain in `HF_HOME`, so restarting the services reuses the existing cache.
+Model weights remain under `HF_HOME`, so restarting does not require downloading them again.
