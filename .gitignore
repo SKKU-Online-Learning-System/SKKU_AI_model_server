@@ -10,5 +10,7 @@ __pycache__/
 *.pcm
 !samples/.gitkeep
 /models/
+.run/
+logs/
 benchmark-results/
 .DS_Store
