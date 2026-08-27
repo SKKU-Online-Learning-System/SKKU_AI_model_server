@@ -1,0 +1,22 @@
+[project]
+name = "skku-ai-model-server-dev"
+version = "0.1.0"
+description = "Developer tooling and API contract tests for the SKKU GPU model server"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "httpx==0.28.1",
+  "numpy==2.2.6",
+  "pydantic-settings==2.10.1",
+  "pytest==8.4.1",
+  "pytest-asyncio==1.1.0",
+  "python-multipart==0.0.20",
+  "scipy==1.16.1",
+  "fastapi==0.116.1",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100

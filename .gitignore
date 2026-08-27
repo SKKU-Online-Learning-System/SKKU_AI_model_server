@@ -1,0 +1,14 @@
+.env
+.venv/
+**/.venv/
+__pycache__/
+.pytest_cache/
+.ruff_cache/
+*.py[cod]
+*.log
+*.wav
+*.pcm
+!samples/.gitkeep
+/models/
+benchmark-results/
+.DS_Store
