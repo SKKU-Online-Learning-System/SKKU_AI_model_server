@@ -1,0 +1,26 @@
+[project]
+name = "skku-speech-server"
+version = "0.1.0"
+description = "Stateless Qwen3 ASR and TTS serving API for SKKU Course Agent"
+requires-python = ">=3.12,<3.14"
+dependencies = [
+  "fastapi==0.116.1",
+  "numpy==2.2.6",
+  "pydantic-settings==2.10.1",
+  "python-multipart==0.0.20",
+  "qwen-asr==0.0.6",
+  "qwen-tts==0.1.1",
+  "scipy==1.16.1",
+  "soundfile==0.13.1",
+  "transformers==4.57.6",
+  "uvicorn[standard]==0.35.0",
+]
+
+[tool.uv]
+# qwen-asr 0.0.6 hard-pins transformers==4.57.6 while qwen-tts 0.1.1
+# hard-pins transformers==4.57.3. The Qwen3 projects have a known packaging-only
+# conflict; 4.57.6 is used here so both official packages can coexist in the
+# single speech process required by this service.
+override-dependencies = [
+  "transformers==4.57.6",
+]
