@@ -15,8 +15,19 @@ def headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {key}"} if key else {}
 
 
+def raise_for_status_with_body(response: httpx.Response) -> None:
+    try:
+        response.raise_for_status()
+    except httpx.HTTPStatusError as exc:
+        body = response.text[:2000]
+        raise RuntimeError(
+            f"{response.request.method} {response.request.url} returned "
+            f"HTTP {response.status_code}: {body}"
+        ) from exc
+
+
 def check_json(response: httpx.Response) -> dict:
-    response.raise_for_status()
+    raise_for_status_with_body(response)
     return response.json()
 
 
@@ -37,7 +48,9 @@ def check_streaming(base_url: str, model: str) -> None:
     got_chunk = False
     with httpx.Client(timeout=180, headers=headers()) as client:
         with client.stream("POST", f"{base_url}/chat/completions", json=payload) as response:
-            response.raise_for_status()
+            if response.is_error:
+                response.read()
+                raise_for_status_with_body(response)
             for line in response.iter_lines():
                 if line.startswith("data: ") and line != "data: [DONE]":
                     got_chunk = True
@@ -124,7 +137,7 @@ def main() -> None:
                 "response_format": "pcm",
             },
         )
-        tts.raise_for_status()
+        raise_for_status_with_body(tts)
         assert tts.headers.get("x-audio-sample-rate") == "24000"
         assert tts.headers.get("x-audio-channels") == "1"
         assert tts.headers.get("x-audio-sample-format") == "pcm_s16le"
@@ -141,7 +154,7 @@ def main() -> None:
                     files={"file": (wav_path.name, audio_file, "audio/wav")},
                     data={"language": "Korean"},
                 )
-            asr.raise_for_status()
+            raise_for_status_with_body(asr)
             asr_json = asr.json()
             assert isinstance(asr_json.get("text"), str) and asr_json["text"].strip()
             print("    transcript:", asr_json["text"])
