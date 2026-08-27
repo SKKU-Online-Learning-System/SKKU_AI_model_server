@@ -16,12 +16,11 @@ fi
 : "${MODEL_SERVER_HOST:=0.0.0.0}"
 
 export CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID}"
-export UV_TORCH_BACKEND=cu128
 
-# start_all.sh prepares the cu128 Speech environment. --no-sync keeps that
-# exact runtime instead of allowing uv run to resolve another CUDA backend.
-exec uv run --no-sync --project "${ROOT_DIR}/speech_server" \
-  uvicorn speech_server.main:app \
+UVICORN_BIN="${ROOT_DIR}/speech_server/.venv/bin/uvicorn"
+[[ -x "${UVICORN_BIN}" ]] || { echo "Speech uv environment is missing. Run ./scripts/start_all.sh first." >&2; exit 1; }
+
+exec "${UVICORN_BIN}" speech_server.main:app \
   --host "${MODEL_SERVER_HOST}" \
   --port "${SPEECH_PORT}" \
   --no-access-log
