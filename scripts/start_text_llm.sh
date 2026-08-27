@@ -19,13 +19,14 @@ fi
 : "${TEXT_GPU_MEMORY_UTILIZATION:=0.90}"
 : "${TEXT_LANGUAGE_MODEL_ONLY:=true}"
 : "${MODEL_SERVER_HOST:=0.0.0.0}"
-: "${VLLM_TORCH_BACKEND:=cu129}"
 
 export CUDA_VISIBLE_DEVICES="${TEXT_GPU_IDS}"
-export UV_TORCH_BACKEND="${VLLM_TORCH_BACKEND}"
+
+VLLM_BIN="${ROOT_DIR}/llm_runtime/.venv/bin/vllm"
+[[ -x "${VLLM_BIN}" ]] || { echo "LLM uv environment is missing. Run ./scripts/start_all.sh first." >&2; exit 1; }
 
 args=(
-  vllm serve "${TEXT_MODEL}"
+  serve "${TEXT_MODEL}"
   --host "${MODEL_SERVER_HOST}"
   --port "${TEXT_PORT}"
   --tensor-parallel-size "${TEXT_TENSOR_PARALLEL_SIZE}"
@@ -46,6 +47,4 @@ if [[ -n "${MODEL_SERVER_API_KEY:-}" ]]; then
   args+=(--api-key "${MODEL_SERVER_API_KEY}")
 fi
 
-# The environment is prepared by start_all.sh. Do not let uv run re-resolve
-# PyTorch, otherwise the cu129 build can be replaced by the default cu130 build.
-exec uv run --no-sync --project "${ROOT_DIR}/llm_runtime" "${args[@]}"
+exec "${VLLM_BIN}" "${args[@]}"
