@@ -33,6 +33,12 @@ mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 : "${VOICE_GPU_IDS:=4}"
 : "${SPEECH_GPU_ID:=5}"
 
+# This is a single-user development server. Always start from a clean set of
+# managed processes so newly validated CUDA/NCCL/runtime settings are actually
+# applied instead of silently reusing processes from an earlier attempt.
+echo "==> Stopping previously managed model services for a clean start"
+"${ROOT_DIR}/scripts/stop_all.sh" || true
+
 # CUDA selection is encoded in each project's pyproject.toml via explicit
 # PyTorch indexes. The LLM project routes torch, torchaudio, torchvision, and
 # torchcodec to the same CUDA 12.9 index so compiled extensions stay ABI-aligned.
