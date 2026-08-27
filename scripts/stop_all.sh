@@ -13,6 +13,18 @@ fi
 
 RUN_DIR="${MODEL_SERVER_RUN_DIR:-${ROOT_DIR}/.run}"
 
+wait_pid_exit() {
+  local pid="$1"
+  local seconds="${2:-30}"
+  for _ in $(seq 1 "${seconds}"); do
+    if ! kill -0 "${pid}" 2>/dev/null; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
 stop_service() {
   local name="$1"
   local pid_file="${RUN_DIR}/${name}.pid"
@@ -25,26 +37,24 @@ stop_service() {
   local pid
   pid="$(cat "${pid_file}")"
 
-  if ! kill -0 -- "-${pid}" 2>/dev/null; then
+  if ! kill -0 "${pid}" 2>/dev/null; then
     echo "==> ${name}: stale pid file (${pid})"
     rm -f "${pid_file}"
     return 0
   fi
 
-  echo "==> Stopping ${name} (process group ${pid})"
-  kill -TERM -- "-${pid}" 2>/dev/null || true
+  echo "==> Stopping ${name} (pid ${pid})"
+  kill -TERM "${pid}" 2>/dev/null || true
 
-  for _ in $(seq 1 30); do
-    if ! kill -0 -- "-${pid}" 2>/dev/null; then
-      rm -f "${pid_file}"
-      echo "    stopped"
-      return 0
-    fi
-    sleep 1
-  done
+  if wait_pid_exit "${pid}" 30; then
+    rm -f "${pid_file}"
+    echo "    stopped"
+    return 0
+  fi
 
   echo "    graceful shutdown timed out; sending SIGKILL"
-  kill -KILL -- "-${pid}" 2>/dev/null || true
+  kill -KILL "${pid}" 2>/dev/null || true
+  wait_pid_exit "${pid}" 10 || true
   rm -f "${pid_file}"
 }
 
