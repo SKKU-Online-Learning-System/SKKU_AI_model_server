@@ -72,48 +72,55 @@ Target:
 - Driver-reported CUDA capability: CUDA 12.8
 - Python: 3.12
 
-### Important CUDA compatibility split
+## CUDA compatibility split
 
 The LLM and Speech services intentionally use separate uv environments.
 
-#### LLM runtime
+### LLM runtime
 
-A plain PyPI resolution of `vllm==0.28.0` can select the CUDA 13 build and install a PyTorch build such as
-`torch 2.13.0+cu130`. That build cannot initialize CUDA on the school R570 / CUDA-12.x driver.
+A plain PyPI resolution of vLLM 0.28.0 can install `torch 2.13.0+cu130`. That CUDA 13 PyTorch build cannot
+initialize CUDA on the school R570 / CUDA-12.x driver.
 
-The repository therefore pins the official x86_64 **vLLM 0.28.0 CUDA 12.9 wheel** directly:
+The repository therefore pins the official x86_64 vLLM 0.28.0 CUDA 12.9 wheel and explicitly routes the
+PyTorch family to the official CUDA 12.9 index from `llm_runtime/pyproject.toml`:
+
+```toml
+[tool.uv.sources]
+torch = { index = "pytorch-cu129" }
+torchaudio = { index = "pytorch-cu129" }
+torchvision = { index = "pytorch-cu129" }
+
+[[tool.uv.index]]
+name = "pytorch-cu129"
+url = "https://download.pytorch.org/whl/cu129"
+explicit = true
+```
+
+This explicit project configuration is important: `UV_TORCH_BACKEND` / `--torch-backend` is intended for
+uv's pip interface and must not be relied on to select a CUDA backend during `uv sync` project resolution.
+
+Expected LLM runtime:
 
 ```text
-vllm-0.28.0+cu129-cp38-abi3-manylinux_2_28_x86_64.whl
+vllm=0.28.0
+torch=2.13.0+cu129
+cuda=12.9
 ```
 
-and syncs the LLM environment with:
+### Speech runtime
 
-```bash
-UV_TORCH_BACKEND=cu129 uv sync --project llm_runtime --no-dev
-```
-
-The default is also exposed as:
-
-```dotenv
-VLLM_TORCH_BACKEND=cu129
-```
-
-CUDA 12.9 is in the CUDA 12.x minor-version compatibility family used by the school R570 driver.
-
-#### Speech runtime
-
-Speech remains pinned to the CUDA 12.8 PyTorch line:
+Speech stays on the PyTorch 2.8 CUDA 12.8 line. `speech_server/pyproject.toml` explicitly routes `torch` and
+`torchaudio` to:
 
 ```text
-torch==2.8.0
-torchaudio==2.8.0
+https://download.pytorch.org/whl/cu128
 ```
 
-and is synced with:
+Expected Speech runtime:
 
-```bash
-UV_TORCH_BACKEND=cu128 uv sync --project speech_server --no-dev
+```text
+torch=2.8.0+cu128
+cuda=12.8
 ```
 
 Do not merge the LLM and Speech Python environments.
@@ -164,7 +171,6 @@ Important defaults:
 ```dotenv
 HF_HOME=/models/huggingface
 MODEL_SERVER_HOST=0.0.0.0
-VLLM_TORCH_BACKEND=cu129
 
 TEXT_MODEL=Qwen/Qwen3.8-27B
 TEXT_PORT=8001
@@ -230,13 +236,31 @@ If older processes are running, stop them first:
 ./scripts/stop_all.sh
 ```
 
-Then:
+If an LLM environment was created before the explicit CUDA 12.9 index was added, remove only that Python
+environment and its local lock before the first restart:
+
+```bash
+rm -rf llm_runtime/.venv
+rm -f llm_runtime/uv.lock
+```
+
+If needed, do the same for Speech:
+
+```bash
+rm -rf speech_server/.venv
+rm -f speech_server/uv.lock
+```
+
+Do **not** delete `/models/huggingface`; model weights are independent of the Python environments.
+
+Then start:
 
 ```bash
 ./scripts/start_all.sh
 ```
 
-Before launching the services, `start_all.sh` performs two real CUDA preflight checks.
+`start_all.sh` runs `uv sync` for each isolated project, then verifies the actual interpreter inside each
+`.venv` before launching model processes.
 
 Expected LLM check:
 
@@ -255,7 +279,14 @@ speech gpu=NVIDIA RTX A5000
 The checks call `torch.cuda.set_device(0)`, not only `torch.cuda.is_available()`, so a driver/runtime mismatch
 fails before model processes are launched.
 
-Large models can take several minutes to load after the processes start.
+After setup, service scripts execute the already prepared binaries directly:
+
+```text
+llm_runtime/.venv/bin/vllm
+speech_server/.venv/bin/uvicorn
+```
+
+They do not invoke another dependency resolution during service startup.
 
 ## 6. Watch startup
 
@@ -293,12 +324,12 @@ GET http://127.0.0.1:8010/health
 
 Speech returns `ready=false` while its models are still loading.
 
-## 8. Debug the LLM environment
+## 8. Debug the environments
 
-Check exactly what uv installed:
+LLM:
 
 ```bash
-uv run --project llm_runtime python - <<'PY'
+CUDA_VISIBLE_DEVICES=4 llm_runtime/.venv/bin/python - <<'PY'
 import torch, vllm
 print("vLLM:", vllm.__version__)
 print("Torch:", torch.__version__)
@@ -309,17 +340,20 @@ print("GPU:", torch.cuda.get_device_name(0))
 PY
 ```
 
-Correct result should be CUDA 12.9, not CUDA 13.0.
+Correct LLM result is `torch 2.13.0+cu129` / CUDA `12.9`, not `cu130` / `13.0`.
 
-If an older LLM environment was created before the cu129 pin was added, reset only that environment:
+Speech:
 
 ```bash
-rm -rf llm_runtime/.venv
-rm -f llm_runtime/uv.lock
-UV_TORCH_BACKEND=cu129 uv sync --project llm_runtime --no-dev
+CUDA_VISIBLE_DEVICES=5 speech_server/.venv/bin/python - <<'PY'
+import torch
+print("Torch:", torch.__version__)
+print("CUDA build:", torch.version.cuda)
+print("CUDA available:", torch.cuda.is_available())
+torch.cuda.set_device(0)
+print("GPU:", torch.cuda.get_device_name(0))
+PY
 ```
-
-Do not delete the Hugging Face model cache; the downloaded model weights can be reused.
 
 ## 9. Text and Voice APIs
 
