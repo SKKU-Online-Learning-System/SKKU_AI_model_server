@@ -2,7 +2,7 @@
 
 Independent, stateless GPU inference server for **SKKU Course Agent**.
 
-This repository serves only models. Application logic remains in
+This repository serves models only. Application logic remains in
 `SKKU-Online-Learning-System/SKKU_AI_agent` and is intentionally not implemented here.
 
 ## Architecture
@@ -14,11 +14,11 @@ This repository serves only models. Application logic remains in
 | ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8010 |
 | TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | official `qwen-tts` | 8010 |
 
-The speech service is one FastAPI service. ASR and TTS are loaded sequentially into the same process and
-share one inference lock. This matches the current single-user development workload and avoids unnecessary
-microservices or ASR/TTS GPU duplication.
+The Speech service is one FastAPI process. ASR and TTS are loaded in the same process and share one
+inference lock. This matches the current single-user development workload and avoids allocating separate
+GPUs to ASR and TTS.
 
-The expected application URLs are:
+Expected application URLs:
 
 ```text
 TEXT_LLM_BASE_URL=http://<MODEL_SERVER>:8001/v1
@@ -26,11 +26,53 @@ VOICE_LLM_BASE_URL=http://<MODEL_SERVER>:8002/v1
 SPEECH_BASE_URL=http://<MODEL_SERVER>:8010
 ```
 
-## Explicit non-goals
+## Repository boundary
 
 This repository does **not** implement RAG, PostgreSQL/pgvector, JWT/RBAC, course logic, External Brain,
 tool execution, trusted web search, visualization, Silero VAD, turn-taking, barge-in orchestration,
 WebSocket session orchestration, frontend logic, or chat history.
+
+Those responsibilities belong to `SKKU_AI_agent`.
+
+## Runtime model: uv only
+
+The school development session is already provided inside a GPU-enabled environment. This repository runs
+all model processes **directly with uv**.
+
+There is no Docker Compose runtime and no Docker-in-Docker requirement. `/var/run/docker.sock` is not
+required.
+
+The runtime layout is:
+
+```text
+school GPU environment
+├── GPU 0,1,2,3  Text LLM    :8001
+├── GPU 4        Voice LLM   :8002
+└── GPU 5        Speech      :8010
+    ├── Qwen3-ASR-0.6B
+    └── Qwen3-TTS-12Hz-0.6B-CustomVoice
+```
+
+Service lifecycle is managed directly by:
+
+```text
+scripts/start_all.sh
+scripts/stop_all.sh
+```
+
+`start_all.sh` launches each service in its own process group and stores:
+
+```text
+.run/text-llm.pid
+.run/voice-llm.pid
+.run/speech.pid
+
+logs/text-llm.log
+logs/voice-llm.log
+logs/speech.log
+```
+
+Both directories are ignored by Git.
 
 ## Target hardware
 
@@ -41,101 +83,20 @@ Current school development server target:
 - CUDA 12.8
 - CPU: 32 cores recommended
 - RAM: 128-160 GiB recommended
-- Docker shared memory: 32 GiB
 
-Current Docker base image configured by default:
+Current school GPU environment is based on CUDA 12.8.1 / PyTorch 2.8.0 / Ubuntu 24.04.
 
-```text
-runpod/pytorch:1.1.0-cu1281-torch280-ubuntu2404-cluster
-```
-
-The `runpod/` namespace is only the image name; the deployment target is the school GPU server.
-Override `BASE_IMAGE` in `.env` if the server uses another compatible CUDA 12.8 image.
-
-## Execution modes on the school server
-
-There are two different ways this repository can be run. Check which environment you are currently in
-before using the startup commands.
-
-### Mode A: school host shell with Docker daemon
-
-Use Docker Compose only when the current shell can reach the host Docker daemon.
-
-Verify:
-
-```bash
-ls -l /var/run/docker.sock
-docker info
-ps -p 1 -o comm=
-```
-
-A usable Docker host normally has `/var/run/docker.sock`, and `docker info` shows both the Client and Server
-sections without a connection error.
-
-In this mode, the Docker Compose commands in this README are valid.
-
-### Mode B: already inside the school GPU container
-
-The current development environment may already be a Docker container created by the school server. A
-common signature is:
-
-```text
-$ ls -l /var/run/docker.sock
-ls: cannot access '/var/run/docker.sock': No such file or directory
-
-$ docker info
-Client: Docker Engine - Community
-...
-Server:
-failed to connect to the docker API at unix:///var/run/docker.sock
-
-$ ps -p 1 -o comm=
-docker-init
-```
-
-This means the Docker CLI is installed, but the container does **not** have access to the host Docker daemon.
-The effective layout is:
-
-```text
-school GPU server host
-└── existing development GPU container
-    └── SKKU_AI_model_server
-```
-
-Do **not** try to solve this by running Docker-in-Docker. In particular, the following commands will fail in
-this mode because they eventually require `/var/run/docker.sock`:
-
-```bash
-docker compose up -d --build text-llm
-docker compose up -d
-./scripts/start_all.sh
-```
-
-Instead, run the model processes directly inside the existing GPU container with **uv**. The intended layout
-is:
-
-```text
-existing school GPU container
-├── GPU 0,1,2,3  Text LLM    :8001
-├── GPU 4        Voice LLM   :8002
-└── GPU 5        Speech      :8010
-```
-
-> Note: the current `start_all.sh` is Docker-Compose based. Until the lifecycle scripts are changed to
-> support direct-process mode, use the direct uv commands below when working inside the existing school GPU
-> container.
-
-## Dependency management: uv
+## Dependency management
 
 All Python dependency management uses **uv**.
 
-There are three projects:
+There are three uv projects:
 
-- root `pyproject.toml`: developer tests and benchmark client
-- `llm_runtime/pyproject.toml`: pinned vLLM runtime
+- root `pyproject.toml`: tests and benchmark client
+- `llm_runtime/pyproject.toml`: vLLM runtime
 - `speech_server/pyproject.toml`: FastAPI + Qwen ASR/TTS runtime
 
-Pinned primary runtime packages:
+Pinned primary packages:
 
 ```text
 vllm==0.28.0
@@ -144,60 +105,49 @@ qwen-tts==0.1.1
 transformers==4.57.6  # speech runtime override
 ```
 
-### Why Speech uses a uv override
+### Qwen ASR/TTS dependency conflict
 
-The official packages currently have a packaging conflict:
+The official packages currently declare different Transformers patch versions:
 
-- `qwen-asr==0.0.6` declares `transformers==4.57.6`
-- `qwen-tts==0.1.1` declares `transformers==4.57.3`
+- `qwen-asr==0.0.6` -> `transformers==4.57.6`
+- `qwen-tts==0.1.1` -> `transformers==4.57.3`
 
-The speech project therefore uses `tool.uv.override-dependencies` to resolve both official packages with
-`transformers==4.57.6`. Keep this override isolated to `speech_server`; do not apply it to the vLLM project.
+The Speech project therefore keeps a **local uv override** for `transformers==4.57.6`. This override is
+isolated to `speech_server` and must not be applied to the vLLM environment.
 
-After dependency resolution has been verified on the school server, generate lock files with:
+## 1. Clone or update the repository
 
 ```bash
-uv lock
-uv lock --project llm_runtime
-uv lock --project speech_server
+git clone https://github.com/SKKU-Online-Learning-System/SKKU_AI_model_server.git
+cd SKKU_AI_model_server
 ```
 
-The Dockerfiles intentionally use `uv sync` and can bootstrap from the pinned `pyproject.toml` files before
-lock files exist. Once lock files are committed, change the image build to `uv sync --frozen` for stricter
-reproducibility.
+If it is already cloned:
 
-## 1. Verify the school server
+```bash
+git pull
+```
 
-First check the GPUs:
+## 2. Verify the GPU environment
 
 ```bash
 nvidia-smi
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv
 ```
 
-Then identify whether you are on the Docker host or already inside a container:
+Verify uv:
 
 ```bash
-ls -l /var/run/docker.sock
-docker info
-ps -p 1 -o comm=
+uv --version
 ```
 
-If you are on a Docker-capable host, you can additionally verify the configured base image:
+The projects require Python 3.12 or newer. If an appropriate interpreter is not already available:
 
 ```bash
-docker --version
-docker compose version
-
-docker run --rm --gpus all \
-  runpod/pytorch:1.1.0-cu1281-torch280-ubuntu2404-cluster \
-  nvidia-smi
+uv python install 3.12
 ```
 
-If `/var/run/docker.sock` does not exist and PID 1 is `docker-init`, skip the Docker commands and use the
-direct uv execution section below.
-
-## 2. Configure environment variables
+## 3. Configure environment variables
 
 ```bash
 cp .env.example .env
@@ -207,191 +157,173 @@ Important defaults:
 
 ```dotenv
 HF_HOME=/models/huggingface
+MODEL_SERVER_HOST=0.0.0.0
+
+TEXT_MODEL=Qwen/Qwen3.8-27B
+TEXT_PORT=8001
 TEXT_GPU_IDS=0,1,2,3
-VOICE_GPU_IDS=4
-SPEECH_GPU_ID=5
+TEXT_TENSOR_PARALLEL_SIZE=4
 TEXT_MAX_MODEL_LEN=16384
+
+VOICE_MODEL=Qwen/Qwen3.5-9B
+VOICE_PORT=8002
+VOICE_GPU_IDS=4
 VOICE_MAX_MODEL_LEN=8192
+
+ASR_MODEL=Qwen/Qwen3-ASR-0.6B
+TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
+SPEECH_PORT=8010
+SPEECH_GPU_ID=5
+
 TTS_LANGUAGE=Korean
 TTS_SPEAKER=Sohee
 ```
 
-All model IDs, GPU mappings, ports, context limits, and the optional API key can be changed in `.env`.
+All model IDs, GPU mappings, ports, context limits, and the optional API key are configurable through
+`.env`.
 
-Load `.env` into the current shell before direct uv execution:
+### API key
+
+Generate a private model-server key, for example:
 
 ```bash
-set -a
-source .env
-set +a
+echo "skku-ms-$(openssl rand -hex 32)"
 ```
 
-## 3. Prepare the persistent Hugging Face cache
+Then place it only in `.env`:
+
+```dotenv
+MODEL_SERVER_API_KEY=skku-ms-...
+```
+
+Never commit `.env` or the API key.
+
+## 4. Prepare the Hugging Face cache
+
+The configured default is:
+
+```text
+/models/huggingface
+```
+
+Make sure the directory exists and is writable by the current user. If `/models` is not writable, point
+`HF_HOME` in `.env` to another persistent directory provided by the school environment.
+
+For example:
+
+```bash
+mkdir -p "$HOME/.cache/huggingface"
+```
+
+and:
+
+```dotenv
+HF_HOME=/home/<USER>/.cache/huggingface
+```
 
 Model weights are never stored in Git.
 
-On a host where `/models/huggingface` is writable, create the cache once:
-
-```bash
-sudo mkdir -p /models/huggingface
-sudo chown -R "$USER":"$USER" /models/huggingface
-```
-
-If the current school container already mounts a persistent model cache, use the mounted path instead and
-set `HF_HOME` accordingly in `.env`.
-
-Download configured models using uvx:
+Pre-download the configured models:
 
 ```bash
 ./scripts/download_models.sh
 ```
 
-Hugging Face snapshots already present in `HF_HOME` are reused rather than downloaded from scratch on each
-restart.
+Existing Hugging Face snapshots are reused.
 
-## 4. Start services
+## 5. Sync the uv environments
 
-### 4A. Docker Compose mode
-
-Use this section only from a shell where `docker info` successfully connects to the Docker Server.
-
-Start only the Text LLM:
+The all-in-one startup script performs these syncs automatically, but they can also be run explicitly:
 
 ```bash
-docker compose up -d --build text-llm
+uv sync --project llm_runtime --no-dev
+uv sync --project speech_server --no-dev
 ```
 
-Start only the Voice LLM:
+For repository tests:
 
 ```bash
-docker compose up -d --build voice-llm
+uv sync
 ```
 
-Start only Speech:
+After dependency compatibility is verified on the school server, lock the projects for reproducibility:
 
 ```bash
-docker compose up -d --build speech
+uv lock
+uv lock --project llm_runtime
+uv lock --project speech_server
 ```
 
-Start everything:
+## 6. Start all model services
 
 ```bash
 ./scripts/start_all.sh
 ```
 
-Inspect logs without logging request bodies:
+The script:
+
+1. loads `.env`
+2. verifies `uv`, `nvidia-smi`, and `setsid`
+3. syncs the LLM and Speech uv projects
+4. launches Text LLM on GPU 0-3
+5. launches Voice LLM on GPU 4
+6. launches Speech on GPU 5
+7. writes PID files under `.run/`
+8. writes logs under `logs/`
+
+Launching a process does not mean the model is immediately ready. Large models can take several minutes to
+load.
+
+### Watch logs
 
 ```bash
-docker compose logs -f text-llm
-docker compose logs -f voice-llm
-docker compose logs -f speech
+tail -f logs/text-llm.log
 ```
-
-### 4B. Direct uv mode inside the existing school GPU container
-
-Use this section when `/var/run/docker.sock` is missing and the current process tree indicates that you are
-already inside the GPU container.
-
-From the repository root:
 
 ```bash
-cd ~/workspace/SKKU_AI_model_server
-
-set -a
-source .env
-set +a
+tail -f logs/voice-llm.log
 ```
-
-#### Text LLM - GPU 0,1,2,3
-
-Install/sync the LLM runtime:
 
 ```bash
-uv sync --project llm_runtime
+tail -f logs/speech.log
 ```
 
-Start the Text LLM:
+### Inspect GPU usage
 
 ```bash
-export CUDA_VISIBLE_DEVICES="${TEXT_GPU_IDS:-0,1,2,3}"
-
-uv run --project llm_runtime \
-  vllm serve "${TEXT_MODEL:-Qwen/Qwen3.8-27B}" \
-  --host "${MODEL_SERVER_HOST:-0.0.0.0}" \
-  --port "${TEXT_PORT:-8001}" \
-  --tensor-parallel-size "${TEXT_TENSOR_PARALLEL_SIZE:-4}" \
-  --max-model-len "${TEXT_MAX_MODEL_LEN:-16384}" \
-  --gpu-memory-utilization "${TEXT_GPU_MEMORY_UTILIZATION:-0.90}" \
-  --dtype bfloat16 \
-  --reasoning-parser qwen3 \
-  --enable-auto-tool-choice \
-  --tool-call-parser qwen3_coder \
-  --disable-log-requests \
-  --enable-request-id-headers \
-  --language-model-only \
-  ${MODEL_SERVER_API_KEY:+--api-key "$MODEL_SERVER_API_KEY"}
+./scripts/gpu_status.sh
 ```
 
-After loading finishes, verify from another shell:
+## 7. Start a service manually
+
+The individual scripts run in the foreground and are useful for debugging.
+
+Text LLM:
 
 ```bash
-curl http://localhost:8001/v1/models \
-  ${MODEL_SERVER_API_KEY:+-H "Authorization: Bearer $MODEL_SERVER_API_KEY"}
+./scripts/start_text_llm.sh
 ```
 
-#### Voice LLM - GPU 4
-
-Start from another shell after loading `.env`:
+Voice LLM:
 
 ```bash
-export CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}"
-
-uv run --project llm_runtime \
-  vllm serve "${VOICE_MODEL:-Qwen/Qwen3.5-9B}" \
-  --host "${MODEL_SERVER_HOST:-0.0.0.0}" \
-  --port "${VOICE_PORT:-8002}" \
-  --tensor-parallel-size 1 \
-  --max-model-len "${VOICE_MAX_MODEL_LEN:-8192}" \
-  --gpu-memory-utilization "${VOICE_GPU_MEMORY_UTILIZATION:-0.88}" \
-  --dtype bfloat16 \
-  --reasoning-parser qwen3 \
-  --enable-auto-tool-choice \
-  --tool-call-parser qwen3_coder \
-  --disable-log-requests \
-  --enable-request-id-headers \
-  --language-model-only \
-  ${MODEL_SERVER_API_KEY:+--api-key "$MODEL_SERVER_API_KEY"}
+./scripts/start_voice_llm.sh
 ```
 
-#### Speech server - GPU 5
-
-Sync the Speech runtime:
+Speech:
 
 ```bash
-uv sync --project speech_server
+./scripts/start_speech.sh
 ```
 
-Then start the FastAPI server:
+The scripts calculate the repository root dynamically; there is no fixed `/app/...` runtime path.
 
-```bash
-export CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID:-5}"
+## 8. Health checks
 
-uv run --project speech_server \
-  uvicorn speech_server.main:app \
-  --host "${MODEL_SERVER_HOST:-0.0.0.0}" \
-  --port "${SPEECH_PORT:-8010}" \
-  --no-access-log
-```
-
-The three commands above are foreground processes. During development, keep them in separate terminal/tmux/
-zellij panes. A future direct-process lifecycle script can wrap them with `nohup`/PID files when persistent
-background execution is needed.
-
-## 5. Health checks
+After the models finish loading:
 
 ```bash
 ./scripts/healthcheck.sh
-./scripts/gpu_status.sh
 ```
 
 Endpoints:
@@ -402,7 +334,9 @@ GET http://localhost:8002/v1/models
 GET http://localhost:8010/health
 ```
 
-Speech `/health` returns `ready=false` while the models are loading. A successful ready response resembles:
+Speech `/health` returns `ready=false` while ASR/TTS are still loading.
+
+Example ready response:
 
 ```json
 {
@@ -415,16 +349,16 @@ Speech `/health` returns `ready=false` while the models are loading. A successfu
 }
 ```
 
-## 6. Text/Voice LLM APIs
+## 9. Text and Voice LLM APIs
 
-Both vLLM services expose OpenAI-compatible endpoints, including:
+Both vLLM services expose OpenAI-compatible endpoints:
 
 ```text
 GET  /v1/models
 POST /v1/chat/completions
 ```
 
-The launch configuration enables the current Qwen3 reasoning and tool parsers:
+The launch scripts enable the current Qwen reasoning/tool parsers:
 
 ```text
 --reasoning-parser qwen3
@@ -432,26 +366,26 @@ The launch configuration enables the current Qwen3 reasoning and tool parsers:
 --tool-call-parser qwen3_coder
 ```
 
-The servers do not inject a system prompt. Application-provided messages pass through unchanged.
+The server does not inject its own application system prompt.
 
-### Request-level thinking disable
+### Disable thinking per request
 
-For latency-sensitive Voice Agent requests, disable thinking per request rather than hard-coding a server
-system prompt:
+For latency-sensitive Voice Agent requests:
 
 ```json
 {
   "model": "Qwen/Qwen3.5-9B",
-  "messages": [{"role": "user", "content": "짧게 답해줘."}],
+  "messages": [
+    {"role": "user", "content": "짧게 답해줘."}
+  ],
   "stream": true,
-  "chat_template_kwargs": {"enable_thinking": false}
+  "chat_template_kwargs": {
+    "enable_thinking": false
+  }
 }
 ```
 
-Current vLLM also accepts reasoning effort controls; the application should choose the behavior request by
-request.
-
-## 7. ASR API
+## 10. ASR API
 
 ```text
 POST /v1/audio/transcriptions
@@ -463,17 +397,18 @@ Input:
 - `file=<audio>`
 - optional `language=Korean`
 - raw PCM: PCM16, mono, 16 kHz
-- WAV: mono/stereo and other sample rates are normalized to mono 16 kHz before inference
+- WAV is also supported and normalized before inference
 
 Example:
 
 ```bash
 curl -X POST http://localhost:8010/v1/audio/transcriptions \
+  -H "Authorization: Bearer $MODEL_SERVER_API_KEY" \
   -F 'file=@sample.wav' \
   -F 'language=Korean'
 ```
 
-Response:
+Example response:
 
 ```json
 {
@@ -484,10 +419,10 @@ Response:
 }
 ```
 
-This MVP is utterance-level. `ASRService` is isolated so a future streaming backend can replace it without
+The MVP API is utterance-level. `ASRService` is isolated so a future streaming backend can replace it without
 changing the public HTTP contract.
 
-## 8. TTS API
+## 11. TTS API
 
 ```text
 POST /v1/audio/speech
@@ -498,6 +433,7 @@ Example:
 
 ```bash
 curl -X POST http://localhost:8010/v1/audio/speech \
+  -H "Authorization: Bearer $MODEL_SERVER_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
     "input":"가상 메모리는 실제 메모리보다 큰 주소 공간을 제공하는 방식이에요.",
@@ -513,35 +449,29 @@ Supported output formats:
 - `pcm`: raw PCM16 little-endian, mono, 24 kHz
 - `wav`: PCM16 WAV, mono, 24 kHz
 
-The service uses official `generate_custom_voice`. It does not fake streaming when the selected backend call
-is utterance-level. `TTSService` is isolated so a true streaming backend can replace it later.
+The service uses the official Qwen CustomVoice implementation. `TTSService` remains isolated so the backend
+can be replaced later without changing the API contract.
 
-## 9. Optional Bearer authentication
+## 12. Authentication
 
-The server is intended for a private network. Set:
-
-```dotenv
-MODEL_SERVER_API_KEY=your-secret
-```
-
-A recommended 256-bit development key can be generated on the server with:
-
-```bash
-echo "skku-ms-$(openssl rand -hex 32)"
-```
-
-Then all three services require:
+When `MODEL_SERVER_API_KEY` is non-empty, all model APIs require:
 
 ```text
-Authorization: Bearer your-secret
+Authorization: Bearer <MODEL_SERVER_API_KEY>
 ```
 
-Leave the value empty for authentication-free local development. Never commit the actual key to Git. No
-browser CORS middleware is enabled.
+For example:
 
-## 10. Unit/API contract tests
+```bash
+curl http://localhost:8001/v1/models \
+  -H "Authorization: Bearer $MODEL_SERVER_API_KEY"
+```
 
-Tests never download the large models. They use fake ASR/TTS backends.
+Leave `MODEL_SERVER_API_KEY` empty only for authentication-free development inside a trusted environment.
+
+## 13. Unit and API-contract tests
+
+Tests do not download the large models. They use mocked ASR/TTS backends.
 
 ```bash
 uv sync
@@ -560,7 +490,7 @@ Covered contracts include:
 - invalid output format
 - PCM16 mono 24 kHz output
 
-## 11. GPU smoke test
+## 14. GPU smoke test
 
 After all services are healthy:
 
@@ -572,21 +502,20 @@ uv sync
 It verifies:
 
 1. Text LLM Korean completion
-2. Text streaming chunk
+2. Text streaming
 3. Text tool calling
 4. Voice LLM streaming
 5. Korean Sohee TTS
 6. Korean ASR
-7. Speech health and PCM16/mono/24 kHz contract
+7. PCM16 / mono / 24 kHz Speech contract
 
-By default, the script synthesizes its own Korean WAV with the TTS service and then transcribes it. To use an
-independent Korean WAV:
+To use an independent Korean WAV:
 
 ```bash
 ./scripts/smoke_test.sh --asr-wav /path/to/korean.wav
 ```
 
-## 12. Benchmark
+## 15. Benchmark
 
 Default single-user benchmark:
 
@@ -597,36 +526,23 @@ uv run python scripts/benchmark.py \
   --output benchmark-results/concurrency-1.json
 ```
 
-Optional development probes:
-
-```bash
-uv run python scripts/benchmark.py --concurrency 2 --asr-wav /path/to/korean.wav
-uv run python scripts/benchmark.py --concurrency 4 --asr-wav /path/to/korean.wav
-```
-
 Metrics:
 
 - Text LLM: TTFT, output tokens/sec, total latency
 - Voice LLM: TTFT, output tokens/sec, total latency
 - ASR: inference latency, audio duration, RTF
 - TTS: generation latency, generated audio duration, RTF
-- GPU: VRAM usage/utilization snapshot before and after
+- GPU: VRAM usage/utilization snapshot
 
-Do not publish benchmark numbers until they are measured on the actual school A5000 server.
+Do not publish benchmark values until they are measured on the actual school A5000 server.
 
-## 13. Shutdown
-
-### Docker Compose mode
+## 16. Stop all services
 
 ```bash
 ./scripts/stop_all.sh
 ```
 
-### Direct uv mode
+The script reads the `.run/*.pid` files, sends `SIGTERM` to each process group, waits up to 30 seconds, and
+uses `SIGKILL` only if a process does not stop cleanly.
 
-The model servers are foreground processes. Stop each process with `Ctrl-C` in its terminal/tmux/zellij pane.
-If you later run them with `nohup`, keep explicit PID files and terminate those PIDs rather than using broad
-`pkill` commands.
-
-The Hugging Face cache remains under the configured `HF_HOME`, so restarting the model processes does not
-require redownloading model weights.
+Model weights remain in `HF_HOME`, so restarting the services reuses the existing cache.
