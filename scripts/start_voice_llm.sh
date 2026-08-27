@@ -45,4 +45,6 @@ if [[ -n "${MODEL_SERVER_API_KEY:-}" ]]; then
   args+=(--api-key "${MODEL_SERVER_API_KEY}")
 fi
 
-exec uv run --project "${ROOT_DIR}/llm_runtime" "${args[@]}"
+# The environment is prepared by start_all.sh. Do not let uv run re-resolve
+# PyTorch, otherwise the cu129 build can be replaced by the default cu130 build.
+exec uv run --no-sync --project "${ROOT_DIR}/llm_runtime" "${args[@]}"
