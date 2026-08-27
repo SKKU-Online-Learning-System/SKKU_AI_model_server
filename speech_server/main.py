@@ -29,6 +29,25 @@ def _configure_logging(verbose: bool) -> None:
     )
 
 
+def _resolve_supported_speaker(requested: str, supported: list[str]) -> str:
+    """Resolve a requested Qwen3-TTS speaker name case-insensitively.
+
+    Qwen3-TTS exposes get_supported_speakers() as lower-cased names while its
+    generation API accepts speaker names case-insensitively. Keep the model
+    server contract aligned with the upstream behavior so documented names such
+    as ``Sohee`` are accepted even when the runtime reports ``sohee``.
+    """
+    if not supported:
+        return requested
+    by_casefold = {str(name).casefold(): str(name) for name in supported}
+    resolved = by_casefold.get(requested.casefold())
+    if resolved is None:
+        raise ValueError(
+            f"Unsupported speaker '{requested}'. Supported: {', '.join(supported)}"
+        )
+    return resolved
+
+
 def create_app(settings: Settings | None = None, runtime: InferenceRuntime | None = None) -> FastAPI:
     cfg = settings or get_settings()
     _configure_logging(cfg.verbose)
@@ -108,14 +127,13 @@ def create_app(settings: Settings | None = None, runtime: InferenceRuntime | Non
     @app.post("/v1/audio/speech")
     async def synthesize(body: SpeechRequest) -> Response:
         require_ready()
-        speaker = body.voice or cfg.tts_speaker
+        requested_speaker = body.voice or cfg.tts_speaker
         language = body.language or cfg.tts_language
         supported = rt.tts.supported_speakers()
-        if supported and speaker not in supported:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Unsupported speaker '{speaker}'. Supported: {', '.join(supported)}",
-            )
+        try:
+            speaker = _resolve_supported_speaker(requested_speaker, supported)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
 
         async with inference_lock:
             result = await asyncio.to_thread(
