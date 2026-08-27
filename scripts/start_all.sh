@@ -13,7 +13,6 @@ fi
 
 command -v uv >/dev/null || { echo "uv is required but was not found in PATH." >&2; exit 1; }
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi is required but was not found in PATH." >&2; exit 1; }
-command -v setsid >/dev/null || { echo "setsid is required but was not found in PATH." >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required but was not found in PATH." >&2; exit 1; }
 command -v timeout >/dev/null || { echo "GNU timeout is required but was not found in PATH." >&2; exit 1; }
 
@@ -148,8 +147,8 @@ start_service() {
   if [[ -f "${pid_file}" ]]; then
     local old_pid
     old_pid="$(cat "${pid_file}")"
-    if kill -0 -- "-${old_pid}" 2>/dev/null; then
-      echo "==> ${name} is already running (process group ${old_pid})"
+    if kill -0 "${old_pid}" 2>/dev/null; then
+      echo "==> ${name} is already running (pid ${old_pid})"
       return 0
     fi
     rm -f "${pid_file}"
@@ -157,19 +156,22 @@ start_service() {
 
   echo "==> Starting ${name}; log: ${log_file}"
   : >"${log_file}"
-  nohup setsid "${script}" >"${log_file}" 2>&1 < /dev/null &
+  # Each start_* script execs the final service process, so nohup + $! gives
+  # us the real long-lived service PID. Avoid setsid here because its optional
+  # fork can make $! differ from the actual service process in some shells.
+  nohup "${script}" >"${log_file}" 2>&1 < /dev/null &
   local pid=$!
   echo "${pid}" >"${pid_file}"
 
   sleep 2
-  if ! kill -0 -- "-${pid}" 2>/dev/null; then
+  if ! kill -0 "${pid}" 2>/dev/null; then
     echo "${name} exited during startup. Last log lines:" >&2
     tail -n 120 "${log_file}" >&2 || true
     rm -f "${pid_file}"
     return 1
   fi
 
-  echo "    process group: ${pid}"
+  echo "    pid: ${pid}"
 }
 
 headers=()
@@ -219,7 +221,7 @@ wait_for_ready() {
 
     local pid
     pid="$(cat "${pid_file}")"
-    if ! kill -0 -- "-${pid}" 2>/dev/null; then
+    if ! kill -0 "${pid}" 2>/dev/null; then
       echo "${name} exited before becoming ready. Last log lines:" >&2
       tail -n 160 "${log_file}" >&2 || true
       rm -f "${pid_file}"
