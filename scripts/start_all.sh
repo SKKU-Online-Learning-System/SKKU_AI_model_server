@@ -32,10 +32,11 @@ CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}" \
 "${ROOT_DIR}/llm_runtime/.venv/bin/python" -c '
 from importlib.metadata import version
 import torch, vllm, torchcodec
-print(f"llm vllm={vllm.__version__} torch={torch.__version__} torchcodec={version(\"torchcodec\")} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
+torchcodec_version = version("torchcodec")
+print(f"llm vllm={vllm.__version__} torch={torch.__version__} torchcodec={torchcodec_version} cuda={torch.version.cuda} available={torch.cuda.is_available()}")
 if not (torch.version.cuda or "").startswith("12.9"):
     raise SystemExit("LLM runtime is not using a CUDA 12.9 PyTorch build")
-if "+cu129" not in version("torchcodec"):
+if "+cu129" not in torchcodec_version:
     raise SystemExit("LLM runtime torchcodec is not using the CUDA 12.9 build")
 if not torch.cuda.is_available():
     raise SystemExit("LLM runtime cannot initialize CUDA")
