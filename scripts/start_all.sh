@@ -15,12 +15,14 @@ command -v uv >/dev/null || { echo "uv is required but was not found in PATH." >
 command -v nvidia-smi >/dev/null || { echo "nvidia-smi is required but was not found in PATH." >&2; exit 1; }
 command -v setsid >/dev/null || { echo "setsid is required but was not found in PATH." >&2; exit 1; }
 command -v curl >/dev/null || { echo "curl is required but was not found in PATH." >&2; exit 1; }
+command -v timeout >/dev/null || { echo "GNU timeout is required but was not found in PATH." >&2; exit 1; }
 
 nvidia-smi >/dev/null
 
 RUN_DIR="${MODEL_SERVER_RUN_DIR:-${ROOT_DIR}/.run}"
 LOG_DIR="${MODEL_SERVER_LOG_DIR:-${ROOT_DIR}/logs}"
 STARTUP_TIMEOUT_SECONDS="${MODEL_SERVER_STARTUP_TIMEOUT_SECONDS:-900}"
+NCCL_PREFLIGHT_TIMEOUT_SECONDS="${NCCL_PREFLIGHT_TIMEOUT_SECONDS:-30}"
 mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 
 : "${TEXT_GPU_IDS:=0,1,2,3}"
@@ -55,18 +57,30 @@ print(f"llm gpu={torch.cuda.get_device_name(0)}")
 '
 
 # Tensor-parallel Text needs working NCCL collectives, not just working
-# single-GPU CUDA. R570/CUDA-12.x containers can have cuMem-host/P2P transport
-# issues. Test the exact Text GPU set before loading 50+ GB of weights.
+# single-GPU CUDA. Test the exact Text GPU set before loading model weights.
+# Every attempt is bounded so a hung NCCL transport can never hang start_all.sh.
 NCCL_ENV_FILE="${RUN_DIR}/text-nccl.env"
 write_nccl_env() {
   local safe_mode="$1"
-  cat >"${NCCL_ENV_FILE}" <<EOF
+  if [[ "${safe_mode}" == "1" ]]; then
+    cat >"${NCCL_ENV_FILE}" <<EOF
+NCCL_CUMEM_HOST_ENABLE=0
+NCCL_IB_DISABLE=1
+NCCL_NET=Socket
+NCCL_SOCKET_IFNAME=lo
+NCCL_DEBUG=WARN
+NCCL_P2P_DISABLE=1
+NCCL_SHM_DISABLE=1
+EOF
+  else
+    cat >"${NCCL_ENV_FILE}" <<EOF
 NCCL_CUMEM_HOST_ENABLE=0
 NCCL_IB_DISABLE=1
 NCCL_DEBUG=WARN
-NCCL_P2P_DISABLE=${safe_mode}
-NCCL_SHM_DISABLE=${safe_mode}
+NCCL_P2P_DISABLE=0
+NCCL_SHM_DISABLE=0
 EOF
+  fi
 }
 
 run_nccl_preflight() {
@@ -74,7 +88,10 @@ run_nccl_preflight() {
   # shellcheck disable=SC1090
   source "${NCCL_ENV_FILE}"
   set +a
-  CUDA_VISIBLE_DEVICES="${TEXT_GPU_IDS}" \
+
+  echo "    NCCL preflight timeout: ${NCCL_PREFLIGHT_TIMEOUT_SECONDS}s"
+  timeout --signal=TERM --kill-after=10s "${NCCL_PREFLIGHT_TIMEOUT_SECONDS}s" \
+    env CUDA_VISIBLE_DEVICES="${TEXT_GPU_IDS}" \
     "${ROOT_DIR}/llm_runtime/.venv/bin/python" -m torch.distributed.run \
       --standalone \
       --nproc_per_node="${TEXT_TENSOR_PARALLEL_SIZE}" \
@@ -88,7 +105,7 @@ if (( TEXT_TENSOR_PARALLEL_SIZE > 1 )); then
   echo "==> Verifying ${TEXT_TENSOR_PARALLEL_SIZE}-GPU NCCL all-reduce"
   write_nccl_env 0
   if ! run_nccl_preflight; then
-    echo "==> Default NCCL transport failed; retrying container-safe socket transport" >&2
+    echo "==> Default NCCL transport failed or timed out; retrying container-safe socket transport" >&2
     write_nccl_env 1
     if ! run_nccl_preflight; then
       echo "NCCL preflight failed even in safe mode; Text LLM will not be started." >&2
