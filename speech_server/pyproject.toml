@@ -12,6 +12,8 @@ dependencies = [
   "qwen-tts==0.1.1",
   "scipy==1.16.1",
   "soundfile==0.13.1",
+  "torch==2.8.0",
+  "torchaudio==2.8.0",
   "transformers==4.57.6",
   "uvicorn[standard]==0.35.0",
 ]
@@ -21,6 +23,7 @@ dependencies = [
 # hard-pins transformers==4.57.3. The Qwen3 projects have a known packaging-only
 # conflict; 4.57.6 is used here so both official packages can coexist in the
 # single speech process required by this service.
+# PyTorch/Torchaudio stay on the 2.8 line used by the CUDA 12.8 school runtime.
 override-dependencies = [
   "transformers==4.57.6",
 ]
