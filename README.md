@@ -52,6 +52,79 @@ runpod/pytorch:1.1.0-cu1281-torch280-ubuntu2404-cluster
 The `runpod/` namespace is only the image name; the deployment target is the school GPU server.
 Override `BASE_IMAGE` in `.env` if the server uses another compatible CUDA 12.8 image.
 
+## Execution modes on the school server
+
+There are two different ways this repository can be run. Check which environment you are currently in
+before using the startup commands.
+
+### Mode A: school host shell with Docker daemon
+
+Use Docker Compose only when the current shell can reach the host Docker daemon.
+
+Verify:
+
+```bash
+ls -l /var/run/docker.sock
+docker info
+ps -p 1 -o comm=
+```
+
+A usable Docker host normally has `/var/run/docker.sock`, and `docker info` shows both the Client and Server
+sections without a connection error.
+
+In this mode, the Docker Compose commands in this README are valid.
+
+### Mode B: already inside the school GPU container
+
+The current development environment may already be a Docker container created by the school server. A
+common signature is:
+
+```text
+$ ls -l /var/run/docker.sock
+ls: cannot access '/var/run/docker.sock': No such file or directory
+
+$ docker info
+Client: Docker Engine - Community
+...
+Server:
+failed to connect to the docker API at unix:///var/run/docker.sock
+
+$ ps -p 1 -o comm=
+docker-init
+```
+
+This means the Docker CLI is installed, but the container does **not** have access to the host Docker daemon.
+The effective layout is:
+
+```text
+school GPU server host
+└── existing development GPU container
+    └── SKKU_AI_model_server
+```
+
+Do **not** try to solve this by running Docker-in-Docker. In particular, the following commands will fail in
+this mode because they eventually require `/var/run/docker.sock`:
+
+```bash
+docker compose up -d --build text-llm
+docker compose up -d
+./scripts/start_all.sh
+```
+
+Instead, run the model processes directly inside the existing GPU container with **uv**. The intended layout
+is:
+
+```text
+existing school GPU container
+├── GPU 0,1,2,3  Text LLM    :8001
+├── GPU 4        Voice LLM   :8002
+└── GPU 5        Speech      :8010
+```
+
+> Note: the current `start_all.sh` is Docker-Compose based. Until the lifecycle scripts are changed to
+> support direct-process mode, use the direct uv commands below when working inside the existing school GPU
+> container.
+
 ## Dependency management: uv
 
 All Python dependency management uses **uv**.
@@ -95,12 +168,24 @@ reproducibility.
 
 ## 1. Verify the school server
 
-From the repository root:
+First check the GPUs:
 
 ```bash
 nvidia-smi
 nvidia-smi --query-gpu=index,name,memory.total,memory.used,memory.free --format=csv
+```
 
+Then identify whether you are on the Docker host or already inside a container:
+
+```bash
+ls -l /var/run/docker.sock
+docker info
+ps -p 1 -o comm=
+```
+
+If you are on a Docker-capable host, you can additionally verify the configured base image:
+
+```bash
 docker --version
 docker compose version
 
@@ -109,7 +194,8 @@ docker run --rm --gpus all \
   nvidia-smi
 ```
 
-You should see six RTX A5000 GPUs and CUDA available inside the container.
+If `/var/run/docker.sock` does not exist and PID 1 is `docker-init`, skip the Docker commands and use the
+direct uv execution section below.
 
 ## 2. Configure environment variables
 
@@ -132,14 +218,27 @@ TTS_SPEAKER=Sohee
 
 All model IDs, GPU mappings, ports, context limits, and the optional API key can be changed in `.env`.
 
+Load `.env` into the current shell before direct uv execution:
+
+```bash
+set -a
+source .env
+set +a
+```
+
 ## 3. Prepare the persistent Hugging Face cache
 
-Model weights are never stored in Git. Create the host cache once:
+Model weights are never stored in Git.
+
+On a host where `/models/huggingface` is writable, create the cache once:
 
 ```bash
 sudo mkdir -p /models/huggingface
 sudo chown -R "$USER":"$USER" /models/huggingface
 ```
+
+If the current school container already mounts a persistent model cache, use the mounted path instead and
+set `HF_HOME` accordingly in `.env`.
 
 Download configured models using uvx:
 
@@ -148,9 +247,13 @@ Download configured models using uvx:
 ```
 
 Hugging Face snapshots already present in `HF_HOME` are reused rather than downloaded from scratch on each
-container restart.
+restart.
 
-## 4. Build and start services
+## 4. Start services
+
+### 4A. Docker Compose mode
+
+Use this section only from a shell where `docker info` successfully connects to the Docker Server.
 
 Start only the Text LLM:
 
@@ -183,6 +286,106 @@ docker compose logs -f text-llm
 docker compose logs -f voice-llm
 docker compose logs -f speech
 ```
+
+### 4B. Direct uv mode inside the existing school GPU container
+
+Use this section when `/var/run/docker.sock` is missing and the current process tree indicates that you are
+already inside the GPU container.
+
+From the repository root:
+
+```bash
+cd ~/workspace/SKKU_AI_model_server
+
+set -a
+source .env
+set +a
+```
+
+#### Text LLM - GPU 0,1,2,3
+
+Install/sync the LLM runtime:
+
+```bash
+uv sync --project llm_runtime
+```
+
+Start the Text LLM:
+
+```bash
+export CUDA_VISIBLE_DEVICES="${TEXT_GPU_IDS:-0,1,2,3}"
+
+uv run --project llm_runtime \
+  vllm serve "${TEXT_MODEL:-Qwen/Qwen3.8-27B}" \
+  --host "${MODEL_SERVER_HOST:-0.0.0.0}" \
+  --port "${TEXT_PORT:-8001}" \
+  --tensor-parallel-size "${TEXT_TENSOR_PARALLEL_SIZE:-4}" \
+  --max-model-len "${TEXT_MAX_MODEL_LEN:-16384}" \
+  --gpu-memory-utilization "${TEXT_GPU_MEMORY_UTILIZATION:-0.90}" \
+  --dtype bfloat16 \
+  --reasoning-parser qwen3 \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --disable-log-requests \
+  --enable-request-id-headers \
+  --language-model-only \
+  ${MODEL_SERVER_API_KEY:+--api-key "$MODEL_SERVER_API_KEY"}
+```
+
+After loading finishes, verify from another shell:
+
+```bash
+curl http://localhost:8001/v1/models \
+  ${MODEL_SERVER_API_KEY:+-H "Authorization: Bearer $MODEL_SERVER_API_KEY"}
+```
+
+#### Voice LLM - GPU 4
+
+Start from another shell after loading `.env`:
+
+```bash
+export CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS:-4}"
+
+uv run --project llm_runtime \
+  vllm serve "${VOICE_MODEL:-Qwen/Qwen3.5-9B}" \
+  --host "${MODEL_SERVER_HOST:-0.0.0.0}" \
+  --port "${VOICE_PORT:-8002}" \
+  --tensor-parallel-size 1 \
+  --max-model-len "${VOICE_MAX_MODEL_LEN:-8192}" \
+  --gpu-memory-utilization "${VOICE_GPU_MEMORY_UTILIZATION:-0.88}" \
+  --dtype bfloat16 \
+  --reasoning-parser qwen3 \
+  --enable-auto-tool-choice \
+  --tool-call-parser qwen3_coder \
+  --disable-log-requests \
+  --enable-request-id-headers \
+  --language-model-only \
+  ${MODEL_SERVER_API_KEY:+--api-key "$MODEL_SERVER_API_KEY"}
+```
+
+#### Speech server - GPU 5
+
+Sync the Speech runtime:
+
+```bash
+uv sync --project speech_server
+```
+
+Then start the FastAPI server:
+
+```bash
+export CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID:-5}"
+
+uv run --project speech_server \
+  uvicorn speech_server.main:app \
+  --host "${MODEL_SERVER_HOST:-0.0.0.0}" \
+  --port "${SPEECH_PORT:-8010}" \
+  --no-access-log
+```
+
+The three commands above are foreground processes. During development, keep them in separate terminal/tmux/
+zellij panes. A future direct-process lifecycle script can wrap them with `nohup`/PID files when persistent
+background execution is needed.
 
 ## 5. Health checks
 
@@ -221,7 +424,7 @@ GET  /v1/models
 POST /v1/chat/completions
 ```
 
-The launch scripts enable the current Qwen3 reasoning and tool parsers:
+The launch configuration enables the current Qwen3 reasoning and tool parsers:
 
 ```text
 --reasoning-parser qwen3
@@ -321,13 +524,20 @@ The server is intended for a private network. Set:
 MODEL_SERVER_API_KEY=your-secret
 ```
 
+A recommended 256-bit development key can be generated on the server with:
+
+```bash
+echo "skku-ms-$(openssl rand -hex 32)"
+```
+
 Then all three services require:
 
 ```text
 Authorization: Bearer your-secret
 ```
 
-Leave the value empty for authentication-free local development. No browser CORS middleware is enabled.
+Leave the value empty for authentication-free local development. Never commit the actual key to Git. No
+browser CORS middleware is enabled.
 
 ## 10. Unit/API contract tests
 
@@ -406,9 +616,17 @@ Do not publish benchmark numbers until they are measured on the actual school A5
 
 ## 13. Shutdown
 
+### Docker Compose mode
+
 ```bash
 ./scripts/stop_all.sh
 ```
 
-The Hugging Face cache remains under `/models/huggingface`, so restarting the containers does not require
-redownloading model weights.
+### Direct uv mode
+
+The model servers are foreground processes. Stop each process with `Ctrl-C` in its terminal/tmux/zellij pane.
+If you later run them with `nohup`, keep explicit PID files and terminate those PIDs rather than using broad
+`pkill` commands.
+
+The Hugging Face cache remains under the configured `HF_HOME`, so restarting the model processes does not
+require redownloading model weights.
