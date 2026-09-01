@@ -125,6 +125,14 @@ fi
 echo "==> Syncing Speech runtime (PyTorch CUDA 12.8 index)"
 uv sync --project "${ROOT_DIR}/speech_server" --no-dev
 
+# FlashAttention is an optional acceleration layer rather than a hard startup
+# dependency. Install the wheel that matches the pinned Torch/Python ABI when
+# possible; QwenTTSService falls back to PyTorch SDPA if this preparation fails.
+echo "==> Preparing FlashAttention 2 for Speech TTS"
+if ! bash "${ROOT_DIR}/scripts/install_flash_attn.sh"; then
+  echo "WARNING: FlashAttention preparation failed; TTS will fall back to SDPA." >&2
+fi
+
 echo "==> Verifying Speech CUDA runtime"
 CUDA_VISIBLE_DEVICES="${SPEECH_GPU_ID}" \
 "${ROOT_DIR}/speech_server/.venv/bin/python" -c '
@@ -136,6 +144,11 @@ if not torch.cuda.is_available():
     raise SystemExit("Speech runtime cannot initialize CUDA")
 torch.cuda.set_device(0)
 print(f"speech gpu={torch.cuda.get_device_name(0)}")
+try:
+    import flash_attn
+    print(f"speech flash_attn={flash_attn.__version__}")
+except ImportError:
+    print("speech flash_attn=unavailable (SDPA fallback will be used)")
 '
 
 start_service() {
