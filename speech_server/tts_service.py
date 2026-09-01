@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import importlib.util
+import logging
 from dataclasses import dataclass
 from time import perf_counter
 from typing import Protocol
@@ -7,6 +9,8 @@ from typing import Protocol
 import numpy as np
 
 from .config import Settings
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -34,16 +38,51 @@ class QwenTTSService:
     def __init__(self, settings: Settings):
         self.settings = settings
         self.model = None
+        self.attention_backend = "unknown"
 
-    def load(self) -> None:
+    def _load_model(self, *, attention_backend: str):
         import torch
         from qwen_tts import Qwen3TTSModel
 
-        self.model = Qwen3TTSModel.from_pretrained(
+        logger.info(
+            "Loading Qwen3 TTS model=%s attention_backend=%s dtype=bfloat16",
+            self.settings.tts_model,
+            attention_backend,
+        )
+        return Qwen3TTSModel.from_pretrained(
             self.settings.tts_model,
             device_map="cuda:0",
             dtype=torch.bfloat16,
+            attn_implementation=attention_backend,
         )
+
+    def load(self) -> None:
+        import torch
+
+        requested = self.settings.tts_attention_backend
+        backend = requested
+        if backend == "flash_attention_2" and importlib.util.find_spec("flash_attn") is None:
+            logger.warning(
+                "TTS_ATTENTION_BACKEND=flash_attention_2 but flash_attn is not installed; "
+                "falling back to sdpa"
+            )
+            backend = "sdpa"
+
+        try:
+            self.model = self._load_model(attention_backend=backend)
+        except Exception:
+            if backend != "flash_attention_2":
+                raise
+            logger.exception(
+                "FlashAttention 2 TTS loading failed; retrying with PyTorch SDPA"
+            )
+            self.model = None
+            torch.cuda.empty_cache()
+            backend = "sdpa"
+            self.model = self._load_model(attention_backend=backend)
+
+        self.attention_backend = backend
+        logger.info("Qwen3 TTS ready attention_backend=%s", self.attention_backend)
 
     def supported_speakers(self) -> list[str]:
         if self.model is None:
@@ -57,6 +96,8 @@ class QwenTTSService:
         if self.model is None:
             raise RuntimeError("TTS model is not loaded.")
 
+        import torch
+
         kwargs = {
             "text": text,
             "language": language,
@@ -66,7 +107,8 @@ class QwenTTSService:
             kwargs["instruct"] = instruct
 
         start = perf_counter()
-        wavs, sample_rate = self.model.generate_custom_voice(**kwargs)
+        with torch.inference_mode():
+            wavs, sample_rate = self.model.generate_custom_voice(**kwargs)
         elapsed_ms = round((perf_counter() - start) * 1000)
         samples = np.asarray(wavs[0], dtype=np.float32).reshape(-1)
         return TTSResult(samples=samples, sample_rate=int(sample_rate), inference_ms=elapsed_ms)
