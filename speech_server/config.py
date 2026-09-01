@@ -1,4 +1,5 @@
 from functools import lru_cache
+from typing import Literal
 
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -17,6 +18,9 @@ class Settings(BaseSettings):
     )
     tts_language: str = Field("Korean", validation_alias="TTS_LANGUAGE")
     tts_speaker: str = Field("Sohee", validation_alias="TTS_SPEAKER")
+    tts_attention_backend: Literal["flash_attention_2", "sdpa", "eager"] = Field(
+        "flash_attention_2", validation_alias="TTS_ATTENTION_BACKEND"
+    )
 
     api_key: str = Field("", validation_alias="MODEL_SERVER_API_KEY")
     verbose: bool = Field(False, validation_alias="MODEL_SERVER_VERBOSE")
