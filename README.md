@@ -10,19 +10,29 @@ This repository serves models only. Application logic remains in `SKKU_AI_agent`
 |---|---|---:|---|---:|
 | Text LLM | `Qwen/Qwen3.8-27B` (vision on) | 0,1,2,3 | vLLM 0.28.0, BF16, TP=4 | 8001 |
 | Voice LLM | `Qwen/Qwen3.5-9B` | 4 | vLLM 0.28.0, BF16, TP=1 | 8002 |
-| ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8010 |
-| TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | official `qwen-tts` | 8010 |
+| ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8004 |
+| TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | `faster-qwen3-tts` (streaming) | 8012 |
+| Embedding | `Qwen/Qwen3-VL-Embedding-2B` | 5 | vLLM 0.28.0, BF16, pooling | 8003 |
 
-The default Backend.AI setup exposes exactly the three available preopen ports:
-`8001`, `8002`, and `8010`. ASR and TTS share the Speech API on `8010`.
+The TTS service is the **streaming Qwen3-TTS runtime on port 8012**. The earlier
+in-process, non-streaming `qwen-tts` on the Speech port remains off by default
+(`SPEECH_TTS_ENABLED=false`); loading it only costs GPU 5 memory.
+
+This branch is configured for the Backend.AI session whose preopen ports are
+`8000`, `8001`, `8002` and `8004`: the Speech API listens on `8004` instead of
+`8010`, while TTS (`8012`) and Embedding (`8003`) are reached over localhost by
+the application running in the same session. See
+[Backend.AI Preopen Ports](#backendai-preopen-ports) for which ports actually
+have to be opened.
 
 Expected application URLs:
 
 ```text
 TEXT_LLM_BASE_URL=http://<MODEL_SERVER>:8001/v1
 VOICE_LLM_BASE_URL=http://<MODEL_SERVER>:8002/v1
-SPEECH_BASE_URL=http://<MODEL_SERVER>:8010
-TTS_BASE_URL=http://<MODEL_SERVER>:8010
+SPEECH_BASE_URL=http://<MODEL_SERVER>:8004
+TTS_BASE_URL=http://<MODEL_SERVER>:8012
+EMBEDDING_BASE_URL=http://<MODEL_SERVER>:8003/v1
 ```
 
 ## Repository boundary
@@ -39,7 +49,9 @@ with **uv**. There is no Docker Compose runtime and no Docker-in-Docker requirem
 school GPU container
 ├── GPU 0,1,2,3  Text LLM    :8001
 ├── GPU 4        Voice LLM   :8002
-└── GPU 5        Speech      :8010  (ASR + TTS)
+├── GPU 5        Speech      :8004  (ASR; Backend.AI preopen port)
+├── GPU 5        Qwen3-TTS   :8012  (streaming TTS, localhost only)
+└── GPU 5        Embedding   :8003  (localhost only)
 ```
 
 Lifecycle scripts:
@@ -189,10 +201,14 @@ VOICE_MAX_MODEL_LEN=8192
 
 ASR_MODEL=Qwen/Qwen3-ASR-0.6B
 TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
-SPEECH_PORT=8010
+SPEECH_PORT=8004
 SPEECH_GPU_ID=5
-SPEECH_TTS_ENABLED=true
-QWEN_TTS_ENABLED=false
+SPEECH_TTS_ENABLED=false
+QWEN_TTS_ENABLED=true
+QWEN_TTS_PORT=8012
+
+EMBEDDING_ENABLED=true
+EMBEDDING_PORT=8003
 
 TTS_LANGUAGE=Auto
 TTS_SPEAKER=Sohee
@@ -200,13 +216,43 @@ TTS_SPEAKER=Sohee
 
 ## Backend.AI Preopen Ports
 
-1. 세션 생성 시 `8001`, `8002`, `8010`을 Preopen Ports에 등록합니다.
-2. `.env`에 비어 있지 않은 `MODEL_SERVER_API_KEY`를 설정합니다.
-3. `./scripts/start_all.sh`를 실행합니다. 모든 서비스는 기본적으로 `0.0.0.0`에 바인딩됩니다.
-4. 세션의 앱 실행 메뉴에서 세 포트를 각각 **Open app to public**으로 엽니다.
-5. 발급된 세 HTTPS 주소를 애플리케이션의 `TEXT_LLM_BASE_URL`,
-   `VOICE_LLM_BASE_URL`, `SPEECH_BASE_URL`에 설정합니다. `TTS_BASE_URL`은
-   `SPEECH_BASE_URL`과 같은 주소를 사용합니다. LLM 주소에만 `/v1`을 붙입니다.
+이 세션의 preopen port는 `8000`, `8001`, `8002`, `8004`입니다
+(`echo $BACKENDAI_PREOPEN_PORTS`). Backend.AI 앱 프록시는 컨테이너 인터페이스로
+접속하므로 공개할 서비스는 `0.0.0.0`에 바인딩돼야 합니다(`MODEL_SERVER_HOST` 기본값).
+
+| 포트 | 서비스 | 공개(**Open app to public**)가 필요한 경우 |
+|---:|---|---|
+| 8000 | Course Agent API (`SKKU_AI_agent`, uvicorn) | 브라우저가 API를 직접 호출하도록 `NEXT_PUBLIC_API_BASE_URL`을 이 앱 주소로 둘 때. 웹 UI의 `/api` rewrite로 같은 origin에서 호출하면 공개하지 않아도 됩니다 |
+| 8001 | Text LLM | 앱이 같은 세션에 있으면 localhost로 호출합니다. 세션 밖 앱이나 외부 테스트에서만 |
+| 8002 | Voice LLM (+ 페이지 이미지 입력) | 같음 |
+| 8004 | Speech API (ASR) — `SPEECH_PORT=8004` | 같음 |
+| 8012 | Qwen3-TTS (streaming) | preopen port가 아닙니다. 같은 세션의 앱이 localhost로 호출합니다 |
+| 8003 | Embedding | preopen port가 아닙니다. 같은 세션의 앱이 localhost로 호출합니다 |
+
+### 앱과 모델 서버가 같은 세션에 있을 때 (기본)
+
+1. `.env`에 비어 있지 않은 `MODEL_SERVER_API_KEY`를 설정하고 `./scripts/start_all.sh`를 실행합니다.
+2. `SKKU_AI_agent`의 `.env`는 `SPEECH_BASE_URL=http://localhost:8004`,
+   `TTS_BASE_URL=http://localhost:8012`, `EMBEDDING_BASE_URL=http://localhost:8003/v1`을 씁니다.
+   모델 서버 쪽에는 **추가 preopen port가 필요하지 않습니다.**
+3. 브라우저가 닿아야 하는 것은 웹 UI(그리고 선택적으로 API `8000`)뿐입니다. 웹 UI(Next.js)의
+   기본 포트 `3000`은 preopen port가 아니고 이미지가 `ipython` pty 서비스 포트로 예약하고 있으므로,
+   SSH 터널이나 VS Code 포트 포워딩으로 열거나 남는 preopen port에서 띄워야 합니다.
+   `SKKU_AI_agent/README.md`의 "Backend.AI preopen port"를 참고합니다.
+
+### 앱이 세션 밖에서 돌 때
+
+앱에 노출해야 하는 모델 서버 포트는 다섯 개입니다: `8001`, `8002`, `8004`, `8012`, `8003`.
+이 토폴로지에서는 `8000`이 비므로 `EMBEDDING_PORT=8000`으로 돌려 써도 네 개 중 하나가 부족합니다.
+
+- 세션을 다시 만들 때 preopen port를 추가합니다(`8012`, `8003`이 허용되면 그대로 등록).
+- 포트를 늘릴 수 없으면 `SPEECH_TTS_ENABLED=true`, `QWEN_TTS_ENABLED=false`로 TTS를 `8004`
+  Speech API에 합칩니다. 이 경로는 스트리밍이 없고 CustomVoice 화자(`Sohee` 등)만 받으므로
+  앱의 `TTS_SPEAKER=ryan`(voice_clone)은 쓸 수 없고 첫 음성까지의 지연이 늘어납니다.
+
+각 포트를 **Open app to public**으로 열고, 발급된 HTTPS 주소를 앱의 `TEXT_LLM_BASE_URL`,
+`VOICE_LLM_BASE_URL`, `SPEECH_BASE_URL`, `TTS_BASE_URL`, `EMBEDDING_BASE_URL`에 넣습니다.
+LLM과 Embedding 주소에만 `/v1`을 붙입니다. 모든 앱은 같은 `MODEL_SERVER_API_KEY`로 보호됩니다.
 
 Backend.AI endpoint는 세션이 살아 있는 동안만 유지됩니다. 세션을 다시 만들거나 앱
 주소가 바뀌면 애플리케이션 환경변수도 갱신해야 합니다.
@@ -338,7 +384,7 @@ Endpoints:
 ```text
 GET http://127.0.0.1:8001/v1/models
 GET http://127.0.0.1:8002/v1/models
-GET http://127.0.0.1:8010/health
+GET http://127.0.0.1:8004/health
 ```
 
 Speech returns `ready=false` while its models are still loading.
@@ -414,7 +460,7 @@ Content-Type: multipart/form-data
 Example:
 
 ```bash
-curl -X POST http://localhost:8010/v1/audio/transcriptions \
+curl -X POST http://localhost:8004/v1/audio/transcriptions \
   -H "Authorization: Bearer $MODEL_SERVER_API_KEY" \
   -F 'file=@sample.wav' \
   -F 'language=Korean'
@@ -443,7 +489,7 @@ Content-Type: application/json
 Example:
 
 ```bash
-curl -X POST http://localhost:8010/v1/audio/speech \
+curl -X POST http://localhost:8004/v1/audio/speech \
   -H "Authorization: Bearer $MODEL_SERVER_API_KEY" \
   -H 'Content-Type: application/json' \
   -d '{
@@ -460,14 +506,16 @@ Output:
 - `pcm`: PCM16 little-endian, mono, 24 kHz
 - `wav`: PCM16 WAV, mono, 24 kHz
 
-## Streaming Qwen3-TTS service (optional fourth port)
+## Streaming Qwen3-TTS service (default TTS)
 
 `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` served through `faster-qwen3-tts` (MIT),
 which adds CUDA graph capture on top of the Apache-2.0 model. Korean is one of
 the model's ten officially supported languages.
 
-This optional service requires another reachable port (`8012`). Keep
-`QWEN_TTS_ENABLED=false` when only the three Backend.AI ports are available.
+Port `8012` is not a Backend.AI preopen port. The application in the same
+session reaches it over localhost, so nothing has to be opened; only an
+application outside the session needs it published (see
+[Backend.AI Preopen Ports](#backendai-preopen-ports)).
 
 ```bash
 curl --no-buffer http://localhost:8012/v1/audio/speech \
@@ -575,7 +623,8 @@ Model weights remain under `HF_HOME`, so restarting does not require downloading
 ## Multimodal document inference
 
 `start_all.sh` now also starts `Qwen/Qwen3-VL-Embedding-2B` (BF16, pooling)
-with `scripts/start_embedding.sh`, on GPU 5 / port 8003 by default. Configure
+with `scripts/start_embedding.sh`, on GPU 5 / port 8003 by default. Like TTS,
+the port is localhost-only on Backend.AI and needs no preopen port. Configure
 `EMBEDDING_ENABLED`, `EMBEDDING_MODEL`, `EMBEDDING_GPU_IDS`, `EMBEDDING_PORT`,
 `EMBEDDING_MAX_MODEL_LEN`, and `EMBEDDING_GPU_MEMORY_UTILIZATION` in `.env`.
 The application owns document conversion, page storage, retrieval and prompts.
