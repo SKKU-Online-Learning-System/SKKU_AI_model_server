@@ -1,0 +1,22 @@
+[project]
+name = "skku-qwen-tts-runtime"
+version = "0.1.0"
+description = "Isolated streaming Qwen3-TTS runtime (12Hz tokenizer, CUDA graph capture)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "faster-qwen3-tts",
+  "fastapi==0.115.6",
+  "numpy",
+  "torch==2.8.0",
+  "torchaudio==2.8.0",
+  "uvicorn[standard]==0.30.0",
+]
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
