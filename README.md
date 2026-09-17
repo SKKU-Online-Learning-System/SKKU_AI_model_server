@@ -13,13 +13,9 @@ This repository serves models only. Application logic remains in `SKKU_AI_agent`
 | ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8010 |
 | TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | `faster-qwen3-tts` (streaming) | 8012 |
 
-The TTS service is the **streaming Qwen3-TTS runtime on port 8012**. Two earlier
-backends remain in the tree but are off by default:
-
-- the in-process, non-streaming `qwen-tts` on `8010` (`SPEECH_TTS_ENABLED=false`)
-- the CosyVoice A/B service on `8011` (`COSYVOICE_ENABLED=false`)
-
-Keeping either loaded only costs GPU 5 memory; nothing routes to them.
+The TTS service is the **streaming Qwen3-TTS runtime on port 8012**. The earlier
+in-process, non-streaming `qwen-tts` on `8010` remains off by default
+(`SPEECH_TTS_ENABLED=false`); loading it only costs GPU 5 memory.
 
 Expected application URLs:
 
@@ -198,7 +194,7 @@ TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 SPEECH_PORT=8010
 SPEECH_GPU_ID=5
 
-TTS_LANGUAGE=Korean
+TTS_LANGUAGE=Auto
 TTS_SPEAKER=Sohee
 ```
 
@@ -468,22 +464,6 @@ curl --no-buffer http://localhost:8012/v1/audio/speech \
 The body is chunked PCM16 little-endian, mono, 24 kHz. `hop_len` optionally
 overrides `QWEN_TTS_CHUNK_SIZE` for a single request.
 
-### Why this replaced CosyVoice
-
-Measured on the school A5000, same Korean sentences, median of three runs:
-
-| | CosyVoice3-0.5B (25 Hz) | Qwen3-TTS-0.6B (12 Hz) |
-|---|---:|---:|
-| time to first packet | 2038 ms | **171 ms** |
-| sustained RTF | 0.93 | **0.36** |
-
-The gap is architectural, not a tuning artifact. CosyVoice's speech-token LLM
-runs at 25 Hz and ~33 ms/token, so it needs RTF ~0.83 for the token stream alone
-before flow matching and the vocoder are counted; its `token2wav` then costs
-~600 ms per call almost regardless of token count. Qwen3-TTS needs half as many
-autoregressive steps per second of audio, and the CUDA graph removes most of the
-per-step Python overhead.
-
 ### Voice consistency: why this runs in clone mode
 
 A turn is synthesized as more than one request (an opening clause, then the rest),
@@ -528,47 +508,17 @@ every chunk seam, so the runtime trims it. Only the silence run at the very end
 of the stream is dropped; a pause is held back until the next chunk proves it was
 internal to the utterance. `QWEN_TTS_SILENCE_THRESHOLD=0` disables this.
 
-## Optional streaming CosyVoice A/B service
+### Abandoned streams
 
-Set `COSYVOICE_ENABLED=true`, `COSYVOICE_PROMPT_WAV`, and the exact spoken
-`COSYVOICE_PROMPT_TEXT`, then run `scripts/download_models.sh` and
-`scripts/start_all.sh`. The isolated Python 3.10 uv service listens on port 8011.
-
-```bash
-curl --no-buffer http://localhost:8011/v1/audio/speech \
-  -H "Authorization: Bearer $MODEL_SERVER_API_KEY" \
-  -H 'Content-Type: application/json' \
-  -d '{"input":"안녕하세요","voice":"cosyvoice","response_format":"pcm","stream":true}' \
-  --output output.pcm
-```
-
-The response body is chunked PCM16 little-endian, mono, 24 kHz. Voice reference
-audio is deployment data and must not be committed.
-
-`stream` defaults to true. `hop_len` optionally overrides the decoder hop for a
-single request.
-
-### Latency characteristics
-
-Measured on the school A5000, `Fun-CosyVoice3-0.5B-2512`, Korean, fp16:
-
-| | value |
-|---|---|
-| time to first PCM packet | ~1.8 s, flat in text length |
-| sustained RTF | ~0.93 |
-| `token2wav` per call | ~600 ms, nearly independent of token count |
-| speech-token LLM | ~33 ms/token at 25 Hz, i.e. RTF ~0.83 on its own |
-
-Two consequences drive how callers should use this service:
-
-- Buffering the whole response throws the streaming away. Consume `aiter_bytes`.
-- Every request pays the ~1.8 s first-packet cost, so many small requests are far
-  worse than a few large ones. Send the first sentence on its own to start
-  playback early, then batch the rest.
-
-`COSYVOICE_TOKEN_HOP_LEN` trades those two against each other. Lowering it to 10
-cut first-packet latency to ~1.2 s in isolation but pushed RTF above 1.0; the
-model default (25) measured best end to end.
+The agent drops a TTS response mid-stream on every barge-in. Starlette cancels the
+response without closing its body iterator, so the runtime never holds the GPU
+lock inside that iterator: synthesis runs on its own thread and the lock is
+released whether or not the response is ever finalised. Closing the response stops
+that thread on the next block; if it is somehow never closed,
+`QWEN_TTS_STREAM_QUEUE_BLOCKS` (default 8) of audio buffer up and the thread gives
+up after `QWEN_TTS_STREAM_STALL_TIMEOUT` seconds (default 5). Without this, one
+abandoned stream stranded the lock and every later request returned 200 with the
+headers and then zero audio.
 
 ## 12. Tests and smoke test
 

@@ -16,7 +16,7 @@ class Settings(BaseSettings):
     tts_model: str = Field(
         "Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice", validation_alias="TTS_MODEL"
     )
-    tts_language: str = Field("Korean", validation_alias="TTS_LANGUAGE")
+    tts_language: str = Field("Auto", validation_alias="TTS_LANGUAGE")
     tts_speaker: str = Field("Sohee", validation_alias="TTS_SPEAKER")
     tts_attention_backend: Literal["flash_attention_2", "sdpa", "eager"] = Field(
         "flash_attention_2", validation_alias="TTS_ATTENTION_BACKEND"

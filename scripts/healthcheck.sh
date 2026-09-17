@@ -11,8 +11,6 @@ fi
 : "${TEXT_PORT:=8001}"
 : "${VOICE_PORT:=8002}"
 : "${SPEECH_PORT:=8010}"
-: "${COSYVOICE_PORT:=8011}"
-: "${COSYVOICE_ENABLED:=false}"
 : "${QWEN_TTS_PORT:=8012}"
 : "${QWEN_TTS_ENABLED:=false}"
 
@@ -56,9 +54,6 @@ check_speech
 
 if [[ "${QWEN_TTS_ENABLED}" == "true" ]]; then
   check_http "Qwen3-TTS" "http://127.0.0.1:${QWEN_TTS_PORT}/health"
-fi
-if [[ "${COSYVOICE_ENABLED}" == "true" ]]; then
-  check_http "CosyVoice TTS" "http://127.0.0.1:${COSYVOICE_PORT}/health"
 fi
 
 if (( failures > 0 )); then

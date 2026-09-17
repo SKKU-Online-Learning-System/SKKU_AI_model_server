@@ -16,9 +16,6 @@ fi
 : "${TTS_MODEL:=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice}"
 : "${QWEN_TTS_ENABLED:=false}"
 : "${QWEN_TTS_MODEL:=Qwen/Qwen3-TTS-12Hz-1.7B-Base}"
-: "${COSYVOICE_ENABLED:=false}"
-: "${COSYVOICE_MODEL:=FunAudioLLM/Fun-CosyVoice3-0.5B-2512}"
-: "${COSYVOICE_MODEL_DIR:=${HF_HOME}/Fun-CosyVoice3-0.5B-2512}"
 export HF_HOME
 
 mkdir -p "${HF_HOME}"
@@ -37,15 +34,5 @@ for model in "${models[@]}"; do
   "${hf[@]}" "${model}"
 done
 
-if [[ "${COSYVOICE_ENABLED}" == "true" ]]; then
-  echo "==> Ensuring streaming CosyVoice model is cached: ${COSYVOICE_MODEL}"
-  "${hf[@]}" "${COSYVOICE_MODEL}" \
-    config.json configuration.json cosyvoice3.yaml campplus.onnx \
-    flow.pt hift.pt llm.pt speech_tokenizer_v3.onnx \
-    CosyVoice-BlankEN/config.json CosyVoice-BlankEN/generation_config.json \
-    CosyVoice-BlankEN/merges.txt CosyVoice-BlankEN/model.safetensors \
-    CosyVoice-BlankEN/tokenizer_config.json CosyVoice-BlankEN/vocab.json \
-    --local-dir "${COSYVOICE_MODEL_DIR}"
-fi
 
 echo "All configured model snapshots are present in ${HF_HOME}."

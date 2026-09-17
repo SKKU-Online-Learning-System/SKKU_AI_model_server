@@ -5,7 +5,7 @@ def test_defaults():
     settings = Settings(_env_file=None)
     assert settings.port == 8010
     assert settings.gpu_id == "5"
-    assert settings.tts_language == "Korean"
+    assert settings.tts_language == "Auto"
     assert settings.tts_speaker == "Sohee"
     assert settings.tts_attention_backend == "flash_attention_2"
 
