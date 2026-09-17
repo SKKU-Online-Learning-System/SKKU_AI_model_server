@@ -127,6 +127,11 @@ def create_app(settings: Settings | None = None, runtime: InferenceRuntime | Non
     @app.post("/v1/audio/speech")
     async def synthesize(body: SpeechRequest) -> Response:
         require_ready()
+        if not cfg.tts_enabled:
+            raise HTTPException(
+                status_code=503,
+                detail="This speech server runs ASR only; use the Qwen3-TTS runtime.",
+            )
         requested_speaker = body.voice or cfg.tts_speaker
         language = body.language or cfg.tts_language
         supported = rt.tts.supported_speakers()

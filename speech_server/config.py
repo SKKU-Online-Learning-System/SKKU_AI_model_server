@@ -21,6 +21,16 @@ class Settings(BaseSettings):
     tts_attention_backend: Literal["flash_attention_2", "sdpa", "eager"] = Field(
         "flash_attention_2", validation_alias="TTS_ATTENTION_BACKEND"
     )
+    # Measured on the A5000: 492ms (sdpa) -> 351ms (FA2) for a 2.2s Korean
+    # utterance. Falls back to sdpa when flash_attn is unavailable.
+    asr_attention_backend: Literal["flash_attention_2", "sdpa", "eager"] = Field(
+        "flash_attention_2", validation_alias="ASR_ATTENTION_BACKEND"
+    )
+
+    # The streaming Qwen3-TTS runtime on its own port supersedes this in-process
+    # TTS. Loading both wastes GPU 5 and slows ASR through contention, so this
+    # service can be started ASR-only.
+    tts_enabled: bool = Field(True, validation_alias="SPEECH_TTS_ENABLED")
 
     api_key: str = Field("", validation_alias="MODEL_SERVER_API_KEY")
     verbose: bool = Field(False, validation_alias="MODEL_SERVER_VERBOSE")

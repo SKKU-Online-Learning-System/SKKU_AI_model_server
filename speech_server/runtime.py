@@ -66,9 +66,12 @@ class InferenceRuntime:
             logger.info("Loading ASR model %s", self.settings.asr_model)
             self.asr.load()
             self._gpu_snapshot("after ASR load")
-            logger.info("Loading TTS model %s", self.settings.tts_model)
-            self.tts.load()
-            self.status.gpu = self._gpu_snapshot("after TTS load")
+            if self.settings.tts_enabled:
+                logger.info("Loading TTS model %s", self.settings.tts_model)
+                self.tts.load()
+                self.status.gpu = self._gpu_snapshot("after TTS load")
+            else:
+                logger.info("SPEECH_TTS_ENABLED=false; serving ASR only")
             self.status.ready = True
         except Exception as exc:
             logger.exception("Speech model loading failed")
