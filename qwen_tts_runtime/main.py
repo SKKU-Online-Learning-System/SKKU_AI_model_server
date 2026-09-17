@@ -12,6 +12,7 @@ import asyncio
 import hmac
 import logging
 import os
+import subprocess
 import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
@@ -26,6 +27,88 @@ from fastapi.responses import Response, StreamingResponse
 from pydantic import BaseModel, Field
 
 logger = logging.getLogger("qwen_tts_runtime")
+
+
+def change_speed(chunks: Iterator[bytes], speed: float, sample_rate: int) -> Iterator[bytes]:
+    """Change PCM tempo with FFmpeg's pitch-preserving streaming filter."""
+    if not 0.5 <= speed <= 2.0:
+        raise ValueError("speed must be between 0.5 and 2.0")
+    if speed == 1.0:
+        yield from chunks
+        return
+
+    command = [
+        "ffmpeg",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "1",
+        "-i",
+        "pipe:0",
+        "-filter:a",
+        f"atempo={speed}",
+        "-f",
+        "s16le",
+        "-ar",
+        str(sample_rate),
+        "-ac",
+        "1",
+        "pipe:1",
+    ]
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            bufsize=0,
+        )
+    except FileNotFoundError as exc:
+        raise RuntimeError("QWEN_TTS_SPEED requires ffmpeg") from exc
+
+    failure: list[BaseException] = []
+
+    def feed() -> None:
+        try:
+            assert process.stdin is not None
+            for chunk in chunks:
+                process.stdin.write(chunk)
+        except BrokenPipeError:
+            pass
+        except BaseException as exc:
+            failure.append(exc)
+        finally:
+            if process.stdin is not None:
+                process.stdin.close()
+
+    feeder = threading.Thread(target=feed, name="qwen-tts-atempo", daemon=True)
+    feeder.start()
+    completed = False
+    try:
+        assert process.stdout is not None
+        while block := process.stdout.read(8192):
+            yield block
+        completed = True
+    finally:
+        if process.stdout is not None:
+            process.stdout.close()
+        if not completed and process.poll() is None:
+            process.terminate()
+        feeder.join(timeout=5)
+        if feeder.is_alive():
+            process.kill()
+            feeder.join()
+        process.wait()
+
+    if failure:
+        raise failure[0]
+    if process.returncode:
+        error = process.stderr.read().decode(errors="replace").strip() if process.stderr else ""
+        raise RuntimeError(f"ffmpeg atempo failed: {error or process.returncode}")
 
 
 def _env_bool(name: str, default: bool) -> bool:
@@ -123,6 +206,8 @@ class Settings:
     repetition_penalty: float = 1.05
     # Free-form style instruction understood by the CustomVoice models.
     instruct: str = ""
+    # Exact output tempo multiplier. FFmpeg atempo preserves pitch.
+    speed: float = 1.0
     warmup_text: str = "안녕하세요."
     # Fallback for a response that is never closed: how much audio it may buffer,
     # and how long the queue may stay full before the reader counts as gone. Only a
@@ -156,6 +241,7 @@ class Settings:
             top_p=float(os.getenv("QWEN_TTS_TOP_P", "1.0") or 1.0),
             repetition_penalty=float(os.getenv("QWEN_TTS_REPETITION_PENALTY", "1.05") or 1.05),
             instruct=os.getenv("QWEN_TTS_INSTRUCT", ""),
+            speed=float(os.getenv("QWEN_TTS_SPEED", "1.0") or 1.0),
             warmup_text=os.getenv("QWEN_TTS_WARMUP_TEXT", "안녕하세요."),
             stream_queue_blocks=int(os.getenv("QWEN_TTS_STREAM_QUEUE_BLOCKS", "8") or 8),
             stream_stall_timeout=float(os.getenv("QWEN_TTS_STREAM_STALL_TIMEOUT", "5") or 5),
@@ -170,6 +256,7 @@ class SpeechRequest(BaseModel):
     language: str | None = None
     response_format: str = "pcm"
     instruct: str | None = None
+    speed: float | None = Field(default=None, ge=0.5, le=2.0)
     stream: bool = True
     temperature: float | None = Field(default=None, ge=0.05, le=2.0)
     top_k: int | None = Field(default=None, ge=1, le=2048)
@@ -277,6 +364,7 @@ class TTSBackend(Protocol):
         temperature: float | None = None, top_k: int | None = None,
         top_p: float | None = None, repetition_penalty: float | None = None,
         continuity_id: str | None = None,
+        speed: float | None = None,
     ) -> Iterator[bytes]: ...
 
 
@@ -348,6 +436,7 @@ class QwenTTSBackend:
         top_p: float | None = None,
         repetition_penalty: float | None = None,
         continuity_id: str | None = None,
+        speed: float | None = None,
     ) -> Iterator[bytes]:
         if self.model is None:
             raise RuntimeError("Qwen3-TTS model is not loaded")
@@ -381,7 +470,9 @@ class QwenTTSBackend:
                 .astype("<i2")
                 for s, _sr, _timing in outputs
             )
-            return self._normalise(self._trim_silence(pcm), continuity_id)
+            rendered = self._normalise(self._trim_silence(pcm), continuity_id)
+            effective_speed = speed if speed is not None else self.settings.speed
+            return change_speed(rendered, effective_speed, self.sample_rate)
 
         return guarded_stream(
             render,
@@ -608,7 +699,7 @@ def create_app(
         chunks = tts.stream_pcm(
             body.input, body.hop_len, body.voice, body.language, body.instruct,
             body.temperature, body.top_k, body.top_p, body.repetition_penalty,
-            body.continuity_id,
+            body.continuity_id, body.speed,
         )
         if body.stream:
             return ClosingStreamingResponse(

@@ -26,7 +26,7 @@ class FakeQwenTTS:
     def stream_pcm(
         self, text, hop_len=None, speaker=None, language=None, instruct=None,
         temperature=None, top_k=None, top_p=None, repetition_penalty=None,
-        continuity_id=None,
+        continuity_id=None, speed=None,
     ):
         self.calls.append(
             {
@@ -36,6 +36,7 @@ class FakeQwenTTS:
                 "language": language,
                 "temperature": temperature,
                 "continuity_id": continuity_id,
+                "speed": speed,
             }
         )
         yield _silence(2400).tobytes()
@@ -62,6 +63,7 @@ def test_streams_pcm_chunks_and_passes_request_options() -> None:
                 "hop_len": 2,
                 "temperature": 0.6,
                 "continuity_id": "turn-7",
+                "speed": 1.25,
             },
         ) as response:
             assert response.status_code == 200
@@ -78,6 +80,7 @@ def test_streams_pcm_chunks_and_passes_request_options() -> None:
             "language": "Korean",
             "temperature": 0.6,
             "continuity_id": "turn-7",
+            "speed": 1.25,
         }
     ]
 
@@ -91,6 +94,31 @@ def test_non_streaming_response_reports_duration() -> None:
     assert response.status_code == 200
     assert response.headers["X-Audio-Duration-Ms"] == "300"
     assert "X-Inference-Ms" in response.headers
+
+
+def test_numeric_speed_changes_duration_without_changing_pitch() -> None:
+    from qwen_tts_runtime.main import change_speed
+
+    sample_rate = 24_000
+    seconds = np.arange(sample_rate) / sample_rate
+    tone = (np.sin(2 * np.pi * 440 * seconds) * 8000).astype("<i2")
+    faster = np.frombuffer(
+        b"".join(change_speed(iter([tone.tobytes()]), 1.25, sample_rate)), dtype="<i2"
+    )
+
+    assert 0.75 * sample_rate < len(faster) < 0.85 * sample_rate
+    spectrum = np.abs(np.fft.rfft(faster))
+    frequency = np.fft.rfftfreq(len(faster), 1 / sample_rate)[spectrum.argmax()]
+    assert abs(frequency - 440) < 10
+
+
+def test_speed_range_is_validated() -> None:
+    with TestClient(create_app(settings(), FakeQwenTTS())) as client:
+        response = client.post(
+            "/v1/audio/speech",
+            json={"input": "안녕하세요", "response_format": "pcm", "speed": 2.1},
+        )
+    assert response.status_code == 422
 
 
 def test_unsupported_response_format_is_rejected() -> None:

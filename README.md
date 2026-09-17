@@ -462,7 +462,9 @@ curl --no-buffer http://localhost:8012/v1/audio/speech \
 ```
 
 The body is chunked PCM16 little-endian, mono, 24 kHz. `hop_len` optionally
-overrides `QWEN_TTS_CHUNK_SIZE` for a single request.
+overrides `QWEN_TTS_CHUNK_SIZE` for a single request. Set `QWEN_TTS_SPEED=1.2`
+for 20% faster speech globally, or send `"speed": 1.2` per request. The accepted
+range is 0.5-2.0, and FFmpeg preserves the original pitch.
 
 ### Voice consistency: why this runs in clone mode
 
