@@ -18,7 +18,13 @@ fi
 : "${TEXT_MAX_MODEL_LEN:=16384}"
 : "${TEXT_MAX_NUM_SEQS:=32}"
 : "${TEXT_GPU_MEMORY_UTILIZATION:=0.90}"
-: "${TEXT_LANGUAGE_MODEL_ONLY:=true}"
+: "${TEXT_LANGUAGE_MODEL_ONLY:=false}"
+# Qwen3.8-27B is a native vision-language model. With the vision encoder on,
+# the application can hand a student's photo or a scanned page straight to the
+# text model instead of transcribing it through the 9B first. Images per
+# request and the pixel cap bound the visual tokens (about 1k per megapixel).
+: "${TEXT_MAX_IMAGES:=3}"
+: "${TEXT_MM_MAX_PIXELS:=1048576}"
 : "${TEXT_DISABLE_CUSTOM_ALL_REDUCE:=true}"
 : "${MODEL_SERVER_HOST:=0.0.0.0}"
 
@@ -62,6 +68,9 @@ args=(
 
 if [[ "${TEXT_LANGUAGE_MODEL_ONLY}" == "true" ]]; then
   args+=(--language-model-only)
+else
+  args+=(--limit-mm-per-prompt "{\"image\":${TEXT_MAX_IMAGES},\"video\":0}"
+         --mm-processor-kwargs "{\"max_pixels\":${TEXT_MM_MAX_PIXELS}}")
 fi
 if [[ "${TEXT_DISABLE_CUSTOM_ALL_REDUCE}" == "true" ]]; then
   args+=(--disable-custom-all-reduce)

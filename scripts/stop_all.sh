@@ -58,6 +58,7 @@ stop_service() {
   rm -f "${pid_file}"
 }
 
+stop_service "embedding"
 stop_service "qwen-tts"
 stop_service "speech"
 stop_service "voice-llm"
