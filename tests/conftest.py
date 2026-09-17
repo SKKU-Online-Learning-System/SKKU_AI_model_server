@@ -13,7 +13,7 @@ from tests.fakes import FakeASR, FakeTTS
 
 @pytest.fixture
 def settings() -> Settings:
-    return Settings(api_key="", verbose=False)
+    return Settings(api_key="", verbose=False, _env_file=None)
 
 
 @pytest.fixture

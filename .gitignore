@@ -6,6 +6,8 @@ __pycache__/
 .ruff_cache/
 *.py[cod]
 *.log
+# Voice reference and comparison audio is deployment data, not source.
+# scripts/make_tts_reference.sh regenerates the clone reference.
 *.wav
 *.pcm
 !samples/.gitkeep
@@ -14,3 +16,4 @@ __pycache__/
 logs/
 benchmark-results/
 .DS_Store
+voice_samples/

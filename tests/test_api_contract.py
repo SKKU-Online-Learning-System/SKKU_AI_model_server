@@ -74,7 +74,7 @@ def test_invalid_output_format(client):
 
 
 def test_optional_authentication():
-    settings = Settings(api_key="secret", verbose=False)
+    settings = Settings(api_key="secret", verbose=False, _env_file=None)
     runtime = InferenceRuntime(settings, asr_service=FakeASR(), tts_service=FakeTTS())
     app = create_app(settings, runtime)
     with TestClient(app) as client:
