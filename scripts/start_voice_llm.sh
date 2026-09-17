@@ -17,7 +17,7 @@ fi
 : "${VOICE_MAX_MODEL_LEN:=8192}"
 : "${VOICE_MAX_NUM_SEQS:=32}"
 : "${VOICE_GPU_MEMORY_UTILIZATION:=0.88}"
-: "${VOICE_LANGUAGE_MODEL_ONLY:=true}"
+: "${VOICE_LANGUAGE_MODEL_ONLY:=false}"
 : "${MODEL_SERVER_HOST:=0.0.0.0}"
 
 export CUDA_VISIBLE_DEVICES="${VOICE_GPU_IDS}"
@@ -43,6 +43,9 @@ args=(
 
 if [[ "${VOICE_LANGUAGE_MODEL_ONLY}" == "true" ]]; then
   args+=(--language-model-only)
+else
+  args+=(--limit-mm-per-prompt '{"image":1,"video":0}'
+         --mm-processor-kwargs '{"max_pixels":1048576}')
 fi
 if [[ -n "${MODEL_SERVER_API_KEY:-}" ]]; then
   args+=(--api-key "${MODEL_SERVER_API_KEY}")

@@ -33,6 +33,8 @@ mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 : "${SPEECH_GPU_ID:=5}"
 : "${QWEN_TTS_ENABLED:=false}"
 : "${QWEN_TTS_PORT:=8012}"
+: "${EMBEDDING_ENABLED:=true}"
+: "${EMBEDDING_PORT:=8003}"
 
 # This is a single-user development server. Always start from a clean set of
 # managed processes so newly validated CUDA/NCCL/runtime settings are actually
@@ -210,6 +212,9 @@ service_ready() {
     voice-llm)
       curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${VOICE_PORT}/v1/models" >/dev/null
       ;;
+    embedding)
+      curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${EMBEDDING_PORT}/v1/models" >/dev/null
+      ;;
     qwen-tts)
       response="$(curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${QWEN_TTS_PORT}/health")" || return 1
       grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"${response}"
@@ -280,6 +285,12 @@ wait_for_ready "speech" || { cleanup_on_failure; exit 1; }
 if [[ "${QWEN_TTS_ENABLED}" == "true" ]]; then
   start_service "qwen-tts" "${ROOT_DIR}/scripts/start_qwen_tts.sh" || { cleanup_on_failure; exit 1; }
   wait_for_ready "qwen-tts" || { cleanup_on_failure; exit 1; }
+fi
+
+if [[ "${EMBEDDING_ENABLED}" == "true" ]]; then
+  # Shared GPU: finish each service's memory profiling before starting the next.
+  start_service "embedding" "${ROOT_DIR}/scripts/start_embedding.sh" || { cleanup_on_failure; exit 1; }
+  wait_for_ready "embedding" || { cleanup_on_failure; exit 1; }
 fi
 
 echo
