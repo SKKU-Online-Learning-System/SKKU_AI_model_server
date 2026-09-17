@@ -31,6 +31,10 @@ mkdir -p "${RUN_DIR}" "${LOG_DIR}"
 : "${SPEECH_PORT:=8010}"
 : "${VOICE_GPU_IDS:=4}"
 : "${SPEECH_GPU_ID:=5}"
+: "${COSYVOICE_ENABLED:=false}"
+: "${COSYVOICE_PORT:=8011}"
+: "${QWEN_TTS_ENABLED:=false}"
+: "${QWEN_TTS_PORT:=8012}"
 
 # This is a single-user development server. Always start from a clean set of
 # managed processes so newly validated CUDA/NCCL/runtime settings are actually
@@ -151,6 +155,16 @@ except ImportError:
     print("speech flash_attn=unavailable (SDPA fallback will be used)")
 '
 
+if [[ "${COSYVOICE_ENABLED}" == "true" ]]; then
+  echo "==> Preparing isolated CosyVoice runtime"
+  bash "${ROOT_DIR}/scripts/prepare_cosyvoice.sh"
+fi
+
+if [[ "${QWEN_TTS_ENABLED}" == "true" ]]; then
+  echo "==> Preparing isolated Qwen3-TTS runtime"
+  uv sync --project "${ROOT_DIR}/qwen_tts_runtime" --python 3.12 --no-dev
+fi
+
 start_service() {
   local name="$1"
   local script="$2"
@@ -201,6 +215,14 @@ service_ready() {
       ;;
     voice-llm)
       curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${VOICE_PORT}/v1/models" >/dev/null
+      ;;
+    cosyvoice)
+      response="$(curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${COSYVOICE_PORT}/health")" || return 1
+      grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"${response}"
+      ;;
+    qwen-tts)
+      response="$(curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${QWEN_TTS_PORT}/health")" || return 1
+      grep -Eq '"ready"[[:space:]]*:[[:space:]]*true' <<<"${response}"
       ;;
     speech)
       response="$(curl --fail --silent --max-time 5 "${headers[@]}" "http://127.0.0.1:${SPEECH_PORT}/health")" || return 1
@@ -265,10 +287,24 @@ start_service "speech" "${ROOT_DIR}/scripts/start_speech.sh" || { cleanup_on_fai
 wait_for_ready "text-llm" || { cleanup_on_failure; exit 1; }
 wait_for_ready "voice-llm" || { cleanup_on_failure; exit 1; }
 wait_for_ready "speech" || { cleanup_on_failure; exit 1; }
+if [[ "${COSYVOICE_ENABLED}" == "true" ]]; then
+  start_service "cosyvoice" "${ROOT_DIR}/scripts/start_cosyvoice.sh" || { cleanup_on_failure; exit 1; }
+  wait_for_ready "cosyvoice" || { cleanup_on_failure; exit 1; }
+fi
+if [[ "${QWEN_TTS_ENABLED}" == "true" ]]; then
+  start_service "qwen-tts" "${ROOT_DIR}/scripts/start_qwen_tts.sh" || { cleanup_on_failure; exit 1; }
+  wait_for_ready "qwen-tts" || { cleanup_on_failure; exit 1; }
+fi
 
 echo
 echo "All model services are READY."
 echo "Text LLM : http://127.0.0.1:${TEXT_PORT}/v1"
 echo "Voice LLM: http://127.0.0.1:${VOICE_PORT}/v1"
 echo "Speech   : http://127.0.0.1:${SPEECH_PORT}"
+if [[ "${COSYVOICE_ENABLED}" == "true" ]]; then
+  echo "CosyVoice: http://127.0.0.1:${COSYVOICE_PORT}"
+fi
+if [[ "${QWEN_TTS_ENABLED}" == "true" ]]; then
+  echo "Qwen3-TTS: http://127.0.0.1:${QWEN_TTS_PORT}"
+fi
 echo "Logs     : ${LOG_DIR}"

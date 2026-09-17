@@ -11,6 +11,10 @@ fi
 : "${TEXT_PORT:=8001}"
 : "${VOICE_PORT:=8002}"
 : "${SPEECH_PORT:=8010}"
+: "${COSYVOICE_PORT:=8011}"
+: "${COSYVOICE_ENABLED:=false}"
+: "${QWEN_TTS_PORT:=8012}"
+: "${QWEN_TTS_ENABLED:=false}"
 
 headers=()
 if [[ -n "${MODEL_SERVER_API_KEY:-}" ]]; then
@@ -49,6 +53,13 @@ check_speech() {
 check_http "Text LLM" "http://127.0.0.1:${TEXT_PORT}/v1/models"
 check_http "Voice LLM" "http://127.0.0.1:${VOICE_PORT}/v1/models"
 check_speech
+
+if [[ "${QWEN_TTS_ENABLED}" == "true" ]]; then
+  check_http "Qwen3-TTS" "http://127.0.0.1:${QWEN_TTS_PORT}/health"
+fi
+if [[ "${COSYVOICE_ENABLED}" == "true" ]]; then
+  check_http "CosyVoice TTS" "http://127.0.0.1:${COSYVOICE_PORT}/health"
+fi
 
 if (( failures > 0 )); then
   echo "${failures} service(s) are not healthy." >&2

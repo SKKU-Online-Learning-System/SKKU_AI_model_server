@@ -11,7 +11,15 @@ This repository serves models only. Application logic remains in `SKKU_AI_agent`
 | Text LLM | `Qwen/Qwen3.8-27B` | 0,1,2,3 | vLLM 0.28.0, BF16, TP=4 | 8001 |
 | Voice LLM | `Qwen/Qwen3.5-9B` | 4 | vLLM 0.28.0, BF16, TP=1 | 8002 |
 | ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8010 |
-| TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | official `qwen-tts` | 8010 |
+| TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | `faster-qwen3-tts` (streaming) | 8012 |
+
+The TTS service is the **streaming Qwen3-TTS runtime on port 8012**. Two earlier
+backends remain in the tree but are off by default:
+
+- the in-process, non-streaming `qwen-tts` on `8010` (`SPEECH_TTS_ENABLED=false`)
+- the CosyVoice A/B service on `8011` (`COSYVOICE_ENABLED=false`)
+
+Keeping either loaded only costs GPU 5 memory; nothing routes to them.
 
 Expected application URLs:
 
@@ -19,6 +27,7 @@ Expected application URLs:
 TEXT_LLM_BASE_URL=http://<MODEL_SERVER>:8001/v1
 VOICE_LLM_BASE_URL=http://<MODEL_SERVER>:8002/v1
 SPEECH_BASE_URL=http://<MODEL_SERVER>:8010
+TTS_BASE_URL=http://<MODEL_SERVER>:8012
 ```
 
 ## Repository boundary
@@ -35,9 +44,8 @@ with **uv**. There is no Docker Compose runtime and no Docker-in-Docker requirem
 school GPU container
 ├── GPU 0,1,2,3  Text LLM    :8001
 ├── GPU 4        Voice LLM   :8002
-└── GPU 5        Speech      :8010
-    ├── ASR
-    └── TTS
+├── GPU 5        Speech      :8010  (ASR)
+└── GPU 5        Qwen3-TTS   :8012  (streaming TTS)
 ```
 
 Lifecycle scripts:
@@ -47,6 +55,8 @@ scripts/start_all.sh
 scripts/stop_all.sh
 scripts/healthcheck.sh
 scripts/gpu_status.sh
+scripts/start_qwen_tts.sh
+scripts/make_tts_reference.sh
 ```
 
 Runtime state:
@@ -169,7 +179,7 @@ cp .env.example .env
 Important defaults:
 
 ```dotenv
-HF_HOME=/models/huggingface
+HF_HOME=${HOME}/.cache/huggingface
 MODEL_SERVER_HOST=0.0.0.0
 
 TEXT_MODEL=Qwen/Qwen3.8-27B
@@ -223,7 +233,7 @@ HF_TOKEN=hf_...
 The default persistent cache is:
 
 ```text
-/models/huggingface
+~/.cache/huggingface
 ```
 
 Existing snapshots are reused.
@@ -251,7 +261,7 @@ rm -rf speech_server/.venv
 rm -f speech_server/uv.lock
 ```
 
-Do **not** delete `/models/huggingface`; model weights are independent of the Python environments.
+Do **not** delete `~/.cache/huggingface`; model weights are independent of the Python environments.
 
 Then start:
 
@@ -440,6 +450,125 @@ Output:
 
 - `pcm`: PCM16 little-endian, mono, 24 kHz
 - `wav`: PCM16 WAV, mono, 24 kHz
+
+## Streaming Qwen3-TTS service (default TTS)
+
+`Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` served through `faster-qwen3-tts` (MIT),
+which adds CUDA graph capture on top of the Apache-2.0 model. Korean is one of
+the model's ten officially supported languages.
+
+```bash
+curl --no-buffer http://localhost:8012/v1/audio/speech \
+  -H "Authorization: Bearer $MODEL_SERVER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"안녕하세요","voice":"Sohee","language":"Korean","response_format":"pcm","stream":true}' \
+  --output output.pcm
+```
+
+The body is chunked PCM16 little-endian, mono, 24 kHz. `hop_len` optionally
+overrides `QWEN_TTS_CHUNK_SIZE` for a single request.
+
+### Why this replaced CosyVoice
+
+Measured on the school A5000, same Korean sentences, median of three runs:
+
+| | CosyVoice3-0.5B (25 Hz) | Qwen3-TTS-0.6B (12 Hz) |
+|---|---:|---:|
+| time to first packet | 2038 ms | **171 ms** |
+| sustained RTF | 0.93 | **0.36** |
+
+The gap is architectural, not a tuning artifact. CosyVoice's speech-token LLM
+runs at 25 Hz and ~33 ms/token, so it needs RTF ~0.83 for the token stream alone
+before flow matching and the vocoder are counted; its `token2wav` then costs
+~600 ms per call almost regardless of token count. Qwen3-TTS needs half as many
+autoregressive steps per second of audio, and the CUDA graph removes most of the
+per-step Python overhead.
+
+### Voice consistency: why this runs in clone mode
+
+A turn is synthesized as more than one request (an opening clause, then the rest),
+and with a CustomVoice speaker id each request realises the timbre independently.
+Measured across requests versus within a single utterance:
+
+| | speaker id | reference audio |
+|---|---:|---:|
+| spectral-shape distance | 1.52x | **~1.0x** |
+| median F0 difference | 11.5 Hz | **6-10 Hz** |
+| loudness ratio | 1.47x (max 1.67x) | **1.10x (max 1.27x)** |
+| spoken-duration CV | 0.09-0.27 | **0.03-0.07** |
+
+So `QWEN_TTS_MODE=voice_clone` conditions every request on the same recording,
+which needs a `*-Base` model plus `QWEN_TTS_REF_WAV` and its exact transcript in
+`QWEN_TTS_REF_TEXT`. `custom_voice` keeps the nine built-in timbres and a
+`*-CustomVoice` model, and is fine for one-shot synthesis.
+
+`samples/qwen_ryan_reference.wav` is itself rendered with the CustomVoice `ryan`
+timbre, which measured cleanest of the nine, then reused as the reference. That
+combines the timbre with clone-mode stability. Audio is deployment data and is
+not committed, so generate it once per deployment:
+
+```bash
+./scripts/make_tts_reference.sh
+```
+
+It renders several takes, keeps the one with the least narrowband energy (takes
+vary audibly) and prints the transcript to copy into `QWEN_TTS_REF_TEXT`. Change
+`QWEN_TTS_REFERENCE_SPEAKER` to base the voice on a different built-in timbre.
+
+Loudness is normalised per request towards `QWEN_TTS_TARGET_RMS_DBFS`. The gain is
+estimated from the voiced audio seen so far and locked after a second, so no
+buffering is added; estimating from only the first block mis-scaled requests with
+a soft onset and made the mismatch worse.
+
+### Silence trimming
+
+The model pads roughly 0.6-0.95 s of silence onto both ends of every utterance.
+Left in, that is added latency at the start of a turn and an unnatural pause at
+every chunk seam, so the runtime trims it. Only the silence run at the very end
+of the stream is dropped; a pause is held back until the next chunk proves it was
+internal to the utterance. `QWEN_TTS_SILENCE_THRESHOLD=0` disables this.
+
+## Optional streaming CosyVoice A/B service
+
+Set `COSYVOICE_ENABLED=true`, `COSYVOICE_PROMPT_WAV`, and the exact spoken
+`COSYVOICE_PROMPT_TEXT`, then run `scripts/download_models.sh` and
+`scripts/start_all.sh`. The isolated Python 3.10 uv service listens on port 8011.
+
+```bash
+curl --no-buffer http://localhost:8011/v1/audio/speech \
+  -H "Authorization: Bearer $MODEL_SERVER_API_KEY" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"안녕하세요","voice":"cosyvoice","response_format":"pcm","stream":true}' \
+  --output output.pcm
+```
+
+The response body is chunked PCM16 little-endian, mono, 24 kHz. Voice reference
+audio is deployment data and must not be committed.
+
+`stream` defaults to true. `hop_len` optionally overrides the decoder hop for a
+single request.
+
+### Latency characteristics
+
+Measured on the school A5000, `Fun-CosyVoice3-0.5B-2512`, Korean, fp16:
+
+| | value |
+|---|---|
+| time to first PCM packet | ~1.8 s, flat in text length |
+| sustained RTF | ~0.93 |
+| `token2wav` per call | ~600 ms, nearly independent of token count |
+| speech-token LLM | ~33 ms/token at 25 Hz, i.e. RTF ~0.83 on its own |
+
+Two consequences drive how callers should use this service:
+
+- Buffering the whole response throws the streaming away. Consume `aiter_bytes`.
+- Every request pays the ~1.8 s first-packet cost, so many small requests are far
+  worse than a few large ones. Send the first sentence on its own to start
+  playback early, then batch the rest.
+
+`COSYVOICE_TOKEN_HOP_LEN` trades those two against each other. Lowering it to 10
+cut first-packet latency to ~1.2 s in isolation but pushed RTF above 1.0; the
+model default (25) measured best end to end.
 
 ## 12. Tests and smoke test
 

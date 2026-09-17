@@ -58,6 +58,8 @@ stop_service() {
   rm -f "${pid_file}"
 }
 
+stop_service "qwen-tts"
+stop_service "cosyvoice"
 stop_service "speech"
 stop_service "voice-llm"
 stop_service "text-llm"
