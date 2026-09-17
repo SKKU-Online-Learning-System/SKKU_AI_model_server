@@ -11,11 +11,10 @@ This repository serves models only. Application logic remains in `SKKU_AI_agent`
 | Text LLM | `Qwen/Qwen3.8-27B` | 0,1,2,3 | vLLM 0.28.0, BF16, TP=4 | 8001 |
 | Voice LLM | `Qwen/Qwen3.5-9B` | 4 | vLLM 0.28.0, BF16, TP=1 | 8002 |
 | ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8010 |
-| TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | `faster-qwen3-tts` (streaming) | 8012 |
+| TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | official `qwen-tts` | 8010 |
 
-The TTS service is the **streaming Qwen3-TTS runtime on port 8012**. The earlier
-in-process, non-streaming `qwen-tts` on `8010` remains off by default
-(`SPEECH_TTS_ENABLED=false`); loading it only costs GPU 5 memory.
+The default Backend.AI setup exposes exactly the three available preopen ports:
+`8001`, `8002`, and `8010`. ASR and TTS share the Speech API on `8010`.
 
 Expected application URLs:
 
@@ -23,7 +22,7 @@ Expected application URLs:
 TEXT_LLM_BASE_URL=http://<MODEL_SERVER>:8001/v1
 VOICE_LLM_BASE_URL=http://<MODEL_SERVER>:8002/v1
 SPEECH_BASE_URL=http://<MODEL_SERVER>:8010
-TTS_BASE_URL=http://<MODEL_SERVER>:8012
+TTS_BASE_URL=http://<MODEL_SERVER>:8010
 ```
 
 ## Repository boundary
@@ -40,8 +39,7 @@ with **uv**. There is no Docker Compose runtime and no Docker-in-Docker requirem
 school GPU container
 ├── GPU 0,1,2,3  Text LLM    :8001
 ├── GPU 4        Voice LLM   :8002
-├── GPU 5        Speech      :8010  (ASR)
-└── GPU 5        Qwen3-TTS   :8012  (streaming TTS)
+└── GPU 5        Speech      :8010  (ASR + TTS)
 ```
 
 Lifecycle scripts:
@@ -193,10 +191,25 @@ ASR_MODEL=Qwen/Qwen3-ASR-0.6B
 TTS_MODEL=Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice
 SPEECH_PORT=8010
 SPEECH_GPU_ID=5
+SPEECH_TTS_ENABLED=true
+QWEN_TTS_ENABLED=false
 
 TTS_LANGUAGE=Auto
 TTS_SPEAKER=Sohee
 ```
+
+## Backend.AI Preopen Ports
+
+1. 세션 생성 시 `8001`, `8002`, `8010`을 Preopen Ports에 등록합니다.
+2. `.env`에 비어 있지 않은 `MODEL_SERVER_API_KEY`를 설정합니다.
+3. `./scripts/start_all.sh`를 실행합니다. 모든 서비스는 기본적으로 `0.0.0.0`에 바인딩됩니다.
+4. 세션의 앱 실행 메뉴에서 세 포트를 각각 **Open app to public**으로 엽니다.
+5. 발급된 세 HTTPS 주소를 애플리케이션의 `TEXT_LLM_BASE_URL`,
+   `VOICE_LLM_BASE_URL`, `SPEECH_BASE_URL`에 설정합니다. `TTS_BASE_URL`은
+   `SPEECH_BASE_URL`과 같은 주소를 사용합니다. LLM 주소에만 `/v1`을 붙입니다.
+
+Backend.AI endpoint는 세션이 살아 있는 동안만 유지됩니다. 세션을 다시 만들거나 앱
+주소가 바뀌면 애플리케이션 환경변수도 갱신해야 합니다.
 
 ### API key
 
@@ -447,11 +460,14 @@ Output:
 - `pcm`: PCM16 little-endian, mono, 24 kHz
 - `wav`: PCM16 WAV, mono, 24 kHz
 
-## Streaming Qwen3-TTS service (default TTS)
+## Streaming Qwen3-TTS service (optional fourth port)
 
 `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` served through `faster-qwen3-tts` (MIT),
 which adds CUDA graph capture on top of the Apache-2.0 model. Korean is one of
 the model's ten officially supported languages.
+
+This optional service requires another reachable port (`8012`). Keep
+`QWEN_TTS_ENABLED=false` when only the three Backend.AI ports are available.
 
 ```bash
 curl --no-buffer http://localhost:8012/v1/audio/speech \
