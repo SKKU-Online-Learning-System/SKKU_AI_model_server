@@ -8,7 +8,7 @@ This repository serves models only. Application logic remains in `SKKU_AI_agent`
 
 | Service | Model | GPU | Runtime | Port |
 |---|---|---:|---|---:|
-| Text LLM | `Qwen/Qwen3.8-27B` | 0,1,2,3 | vLLM 0.28.0, BF16, TP=4 | 8001 |
+| Text LLM | `Qwen/Qwen3.8-27B` (vision on) | 0,1,2,3 | vLLM 0.28.0, BF16, TP=4 | 8001 |
 | Voice LLM | `Qwen/Qwen3.5-9B` | 4 | vLLM 0.28.0, BF16, TP=1 | 8002 |
 | ASR | `Qwen/Qwen3-ASR-0.6B` | 5 | official `qwen-asr` | 8010 |
 | TTS | `Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice` | 5 | `faster-qwen3-tts` (streaming) | 8012 |
@@ -555,3 +555,27 @@ Metrics include LLM TTFT/tokens-per-second, ASR/TTS latency and RTF, and GPU uti
 ```
 
 Model weights remain under `HF_HOME`, so restarting does not require downloading them again.
+
+## Multimodal document inference
+
+`start_all.sh` now also starts `Qwen/Qwen3-VL-Embedding-2B` (BF16, pooling)
+with `scripts/start_embedding.sh`, on GPU 5 / port 8003 by default. Configure
+`EMBEDDING_ENABLED`, `EMBEDDING_MODEL`, `EMBEDDING_GPU_IDS`, `EMBEDDING_PORT`,
+`EMBEDDING_MAX_MODEL_LEN`, and `EMBEDDING_GPU_MEMORY_UTILIZATION` in `.env`.
+The application owns document conversion, page storage, retrieval and prompts.
+
+The existing Qwen3.5-9B server accepts page images when
+`VOICE_LANGUAGE_MODEL_ONLY=false` (the new default). Voice generation keeps the
+same model. No separate vision-generation service is required.
+
+For this embedding checkpoint, `/v1/embeddings` chat requests must specify
+`add_generation_prompt: true` **and** `add_special_tokens: true`. The tokenizer's
+terminal `<|endoftext|>` is the pooled token. Omitting it returns valid-shaped but
+incorrect embeddings. Verify against official Transformers with:
+
+```bash
+uv run --project llm_runtime python scripts/check_embedding_parity.py
+```
+
+This explicit live check loads the official model on CPU, compares token IDs and
+requires vector cosine > 0.99. It is not part of offline unit tests.
