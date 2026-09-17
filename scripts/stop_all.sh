@@ -25,6 +25,17 @@ wait_pid_exit() {
   return 1
 }
 
+# All live descendants of a pid, deepest first. vLLM's API server forks an
+# EngineCore that forks one worker per GPU; SIGKILL on the API server alone
+# orphans them and they keep the GPUs until killed by hand.
+descendants() {
+  local pid="$1" child
+  for child in $(pgrep -P "${pid}" 2>/dev/null); do
+    descendants "${child}"
+    echo "${child}"
+  done
+}
+
 stop_service() {
   local name="$1"
   local pid_file="${RUN_DIR}/${name}.pid"
@@ -44,6 +55,8 @@ stop_service() {
   fi
 
   echo "==> Stopping ${name} (pid ${pid})"
+  local children
+  children="$(descendants "${pid}")"
   kill -TERM "${pid}" 2>/dev/null || true
 
   if wait_pid_exit "${pid}" 30; then
@@ -55,6 +68,14 @@ stop_service() {
   echo "    graceful shutdown timed out; sending SIGKILL"
   kill -KILL "${pid}" 2>/dev/null || true
   wait_pid_exit "${pid}" 10 || true
+  # The parent is gone; reap whatever it left behind so the GPUs are released.
+  local child
+  for child in ${children}; do
+    if kill -0 "${child}" 2>/dev/null; then
+      echo "    killing orphaned child ${child}"
+      kill -KILL "${child}" 2>/dev/null || true
+    fi
+  done
   rm -f "${pid_file}"
 }
 
